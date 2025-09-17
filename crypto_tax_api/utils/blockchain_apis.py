@@ -137,6 +137,7 @@ def fetch_price_data(symbol, force_refresh=False):
         'MATIC': Decimal('0.80'),
         'AVAX': Decimal('25.00'),
         'SOL': Decimal('100.00'),
+        'ARB': Decimal('0.50'),
         'USDT': Decimal('1.00'),
         'USDC': Decimal('1.00'),
         'BUSD': Decimal('1.00'),
@@ -168,23 +169,15 @@ def fetch_ethereum_transactions(address):
     """
     Fetch transactions for an Ethereum address using Alchemy API with proper authentication
     """
-    # Try the regular Alchemy API key first (it works for Solana too)
-    api_key = os.environ.get('ALCHEMY_API_KEY')
-    if not api_key:
-        # Fallback to Solana-specific key if available
-        api_key = os.environ.get('ALCHEMY_SOLANA_API_KEY')
-    if not api_key:
-        # Use the working hardcoded key as last resort
-        api_key = 'PHwvYViFcbMNwC8Tb_FI06AnU9LId5S9'
-
-    # Ensure the API key doesn't have any quotes or extra spaces
-    api_key = api_key.strip().replace("'", "").replace('"', '')
+    # API Key Management following the generalizable pattern
+    api_key = get_alchemy_api_key('ALCHEMY_ETHEREUM_API_KEY')
 
     if not api_key:
-        logger.error(f"No Alchemy API key configured. Env vars: {list(os.environ.keys())[:10]}")
+        logger.error(f"No Alchemy API key configured for Ethereum")
         return []
 
-    alchemy_url = f"https://eth-mainnet.g.alchemy.com/v2/{api_key}"
+    # Endpoint Construction
+    alchemy_url = ALCHEMY_ENDPOINTS['ethereum'].format(api_key=api_key)
     logger.info(f"Starting Ethereum transaction fetch for address: {address}")
 
     try:
@@ -456,23 +449,15 @@ def fetch_solana_transactions(address):
     """
     Fetch Solana transactions using Alchemy API with proper authentication
     """
-    # Try the regular Alchemy API key first (it works for Solana too)
-    api_key = os.environ.get('ALCHEMY_API_KEY')
-    if not api_key:
-        # Fallback to Solana-specific key if available
-        api_key = os.environ.get('ALCHEMY_SOLANA_API_KEY')
-    if not api_key:
-        # Use the working hardcoded key as last resort
-        api_key = 'PHwvYViFcbMNwC8Tb_FI06AnU9LId5S9'
-
-    # Ensure the API key doesn't have any quotes or extra spaces
-    api_key = api_key.strip().replace("'", "").replace('"', '')
+    # API Key Management following the generalizable pattern
+    api_key = get_alchemy_api_key('ALCHEMY_SOLANA_API_KEY')
 
     if not api_key:
-        logger.error(f"No Alchemy API key configured. Env vars: {list(os.environ.keys())[:10]}")
+        logger.error(f"No Alchemy API key configured for Solana")
         return []
 
-    alchemy_url = f"https://solana-mainnet.g.alchemy.com/v2/{api_key}"
+    # Endpoint Construction
+    alchemy_url = ALCHEMY_ENDPOINTS['solana'].format(api_key=api_key)
     logger.info(f"Starting Solana transaction fetch for address: {address}")
 
     all_transactions = []
@@ -810,19 +795,62 @@ def parse_solana_tax_transaction(parsed_tx, user_address, signature, block_time)
     return transactions
 
 
+def get_alchemy_api_key(network_specific_var=None):
+    """
+    Standard API key retrieval pattern for all blockchain integrations
+    """
+    # Try primary unified key first
+    api_key = os.environ.get('ALCHEMY_API_KEY')
+
+    # Fallback to network-specific key if provided
+    if not api_key and network_specific_var:
+        api_key = os.environ.get(network_specific_var)
+
+    # Special case for Arbitrum - use the user's provided API key
+    if network_specific_var == 'ALCHEMY_ARBITRUM_API_KEY':
+        api_key = 'dN6yJ1dHDtCc9LIRC2lDf'  # User's provided Arbitrum API key
+    elif not api_key:
+        # Last resort hardcoded fallback for other chains
+        api_key = 'PHwvYViFcbMNwC8Tb_FI06AnU9LId5S9'
+
+    # Clean the API key
+    api_key = api_key.strip().replace("'", "").replace('"', '')
+
+    return api_key
+
+
+# Alchemy endpoint configuration
+ALCHEMY_ENDPOINTS = {
+    'ethereum': 'https://eth-mainnet.g.alchemy.com/v2/{api_key}',
+    'solana': 'https://solana-mainnet.g.alchemy.com/v2/{api_key}',
+    'polygon': 'https://polygon-mainnet.g.alchemy.com/v2/{api_key}',
+    'arbitrum': 'https://arb-mainnet.g.alchemy.com/v2/{api_key}',
+    'optimism': 'https://opt-mainnet.g.alchemy.com/v2/{api_key}',
+    'base': 'https://base-mainnet.g.alchemy.com/v2/{api_key}',
+}
+
+
 def fetch_arbitrum_transactions(address):
     """
-    Fetch transactions for an Arbitrum address using Alchemy API
+    Fetch transactions for an Arbitrum address using Alchemy API with proper authentication
     """
+    # API Key Management following the generalizable pattern
+    api_key = get_alchemy_api_key('ALCHEMY_ARBITRUM_API_KEY')
+
+    if not api_key:
+        logger.error(f"No Alchemy API key configured for Arbitrum")
+        return []
+
+    # Endpoint Construction
+    alchemy_url = ALCHEMY_ENDPOINTS['arbitrum'].format(api_key=api_key)
+    logger.info(f"Starting Arbitrum transaction fetch for address: {address}")
+
     try:
-        # Normalize address
+        # Address Normalization
         address = address.lower()
 
         # Initialize web3
         w3 = Web3()
-
-        # Fetch transactions using Alchemy with Arbitrum endpoint
-        alchemy_url = f"https://arb-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}"
 
         # Get normal transactions
         normal_tx_payload = {
@@ -887,10 +915,13 @@ def fetch_arbitrum_transactions(address):
                 if not all(k in tx for k in ['hash', 'from', 'to']):
                     continue
 
-                # Handle missing asset
+                # Handle missing asset - Arbitrum uses ETH as gas token
                 asset = tx.get('asset', 'ETH')  # Default to ETH for Arbitrum
                 if asset is None:
                     asset = 'ETH'  # Default to ETH if no asset specified
+
+                # Map ETH to ARB for native Arbitrum token transactions if needed
+                # Note: ETH is the primary gas token on Arbitrum, but ARB is the governance token
 
                 # Make sure we have a value field, default to 0 if missing
                 if 'value' not in tx:
@@ -965,7 +996,7 @@ def fetch_arbitrum_transactions(address):
                 if not all(k in tx for k in ['hash', 'from', 'to']):
                     continue
 
-                # Handle missing asset
+                # Handle missing asset - Arbitrum uses ETH as gas token
                 asset = tx.get('asset', 'ETH')  # Default to ETH for Arbitrum
                 if asset is None:
                     asset = 'ETH'  # Default to ETH if no asset specified
@@ -1037,50 +1068,9 @@ def fetch_arbitrum_transactions(address):
                     'fee_usd': Decimal('0.00')  # Incoming transfers don't pay gas
                 })
 
-        # For testing, if we don't have any transactions, add mock transactions
+        # Log if no transactions found (don't add mock data for real testing)
         if not processed_transactions:
-            # Create mock transactions
-            current_time = django_timezone.now()
-
-            # Mock buy transactions
-            for i in range(1, 6):
-                processed_transactions.append({
-                    'transaction_hash': f'0xarbbuymock{i}',
-                    'timestamp': current_time.replace(day=i, month=1, hour=12),
-                    'transaction_type': 'buy',
-                    'asset_symbol': 'ETH',
-                    'amount': Decimal('0.2'),
-                    'price_usd': Decimal('2800.00'),
-                    'value_usd': Decimal('560.00'),
-                    'fee_usd': Decimal('1.00')
-                })
-
-            # Mock sell transactions
-            for i in range(1, 4):
-                processed_transactions.append({
-                    'transaction_hash': f'0xarbsellmock{i}',
-                    'timestamp': current_time.replace(day=i, month=3, hour=14),
-                    'transaction_type': 'sell',
-                    'asset_symbol': 'ETH',
-                    'amount': Decimal('0.1'),
-                    'price_usd': Decimal('3000.00'),
-                    'value_usd': Decimal('300.00'),
-                    'fee_usd': Decimal('0.50')
-                })
-
-            # Add some mock token transactions
-            tokens = ['UNI', 'LINK', 'AAVE']
-            for i, token in enumerate(tokens, 1):
-                processed_transactions.append({
-                    'transaction_hash': f'0xarbtoken{i}',
-                    'timestamp': current_time.replace(day=i + 10, month=2, hour=14),
-                    'transaction_type': 'buy',
-                    'asset_symbol': token,
-                    'amount': Decimal('10.0'),
-                    'price_usd': Decimal('15.00'),
-                    'value_usd': Decimal('150.00'),
-                    'fee_usd': Decimal('0.30')
-                })
+            logger.warning(f"No transactions found for Arbitrum address {address} - returning empty list (no mock data)")
 
         # Sort by timestamp
         processed_transactions.sort(key=lambda x: x['timestamp'])
