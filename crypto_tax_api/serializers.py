@@ -67,7 +67,7 @@ class WalletAnalysisSerializer(serializers.Serializer):
     total_value_usd = serializers.FloatField()
     holdings = AssetHoldingSerializer(many=True, required=False)
     monthly_pnl = serializers.ListField(child=serializers.DictField(), required=False)
-    recent_transactions = TransactionSerializer(many=True, required=False)
+    recent_transactions = serializers.ListField(child=serializers.DictField(), required=False)
 
 
 class Form8949EntrySerializer(serializers.Serializer):

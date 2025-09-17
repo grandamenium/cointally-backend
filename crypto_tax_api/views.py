@@ -12,7 +12,7 @@ from django.db.models import Sum, Count, Avg, Max, Min
 from django.db.models.functions import TruncMonth, TruncDate
 from django.http import HttpResponse
 from django.utils import timezone
-from rest_framework import status, viewsets, generics
+from rest_framework import status, viewsets, generics, serializers
 from rest_framework.decorators import action, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -133,7 +133,24 @@ class WalletViewSet(viewsets.ModelViewSet):
         # Calculate monthly P&L
         monthly_pnl = self._calculate_monthly_pnl(wallet)
 
-        # Prepare response
+        # Prepare response - serialize transactions separately to avoid validation issues
+        serialized_transactions = []
+        for tx in transactions:
+            serialized_transactions.append({
+                'id': tx.id,
+                'wallet': tx.wallet.id,
+                'transaction_hash': tx.transaction_hash,
+                'timestamp': tx.timestamp,
+                'transaction_type': tx.transaction_type,
+                'asset_symbol': tx.asset_symbol,
+                'amount': str(tx.amount),
+                'price_usd': str(tx.price_usd),
+                'value_usd': str(tx.value_usd),
+                'fee_usd': str(tx.fee_usd) if tx.fee_usd else '0.00',
+                'cost_basis_usd': str(tx.cost_basis_usd) if tx.cost_basis_usd else None,
+                'realized_profit_loss': str(tx.realized_profit_loss) if tx.realized_profit_loss else None
+            })
+
         response_data = {
             'address': wallet.address,
             'chain': wallet.chain,
@@ -146,11 +163,14 @@ class WalletViewSet(viewsets.ModelViewSet):
             'total_value_usd': float(total_value_usd),
             'holdings': AssetHoldingSerializer(holdings, many=True).data,
             'monthly_pnl': monthly_pnl,
-            'recent_transactions': TransactionSerializer(transactions, many=True).data
+            'recent_transactions': serialized_transactions
         }
 
         serializer = WalletAnalysisSerializer(data=response_data)
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            logger.error(f"Serializer validation failed: {serializer.errors}")
+            logger.error(f"Response data: {response_data}")
+            raise serializers.ValidationError(serializer.errors)
 
         return Response(serializer.data)
 

@@ -5,6 +5,7 @@ import os
 import json
 import logging
 import requests
+import time
 from decimal import Decimal
 from datetime import datetime, timezone
 from django.utils import timezone as django_timezone
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 # API keys from settings
 COVALENT_API_KEY = os.environ.get('COVALENT_API_KEY', '')
 ALCHEMY_API_KEY = os.environ.get('ALCHEMY_API_KEY', '')
+ALCHEMY_SOLANA_API_KEY = os.environ.get('ALCHEMY_SOLANA_API_KEY', '')
 
 # Cache for price data (would use Redis in production)
 price_cache = {}
@@ -436,156 +438,360 @@ def fetch_ethereum_transactions(address):
 
 def fetch_solana_transactions(address):
     """
-    Fetch transactions for a Solana address using Solana RPC API
+    Fetch Solana transactions using Alchemy API with proper authentication
     """
-    alchemy_url = "https://solana-mainnet.g.alchemy.com/v2/dN6yJ1dHDtCc9LIRC2lDf"
+    # Try the regular Alchemy API key first (it works for Solana too)
+    api_key = os.environ.get('ALCHEMY_API_KEY')
+    if not api_key:
+        # Fallback to Solana-specific key if available
+        api_key = os.environ.get('ALCHEMY_SOLANA_API_KEY')
+    if not api_key:
+        # Use the working hardcoded key as last resort
+        api_key = 'PHwvYViFcbMNwC8Tb_FI06AnU9LId5S9'
+
+    # Ensure the API key doesn't have any quotes or extra spaces
+    api_key = api_key.strip().replace("'", "").replace('"', '')
+
+    if not api_key:
+        logger.error(f"No Alchemy API key configured. Env vars: {list(os.environ.keys())[:10]}")
+        return []
+
+    alchemy_url = f"https://solana-mainnet.g.alchemy.com/v2/{api_key}"
     logger.info(f"Starting Solana transaction fetch for address: {address}")
+
+    all_transactions = []
+    before_signature = None
+    max_iterations = 10  # Limit iterations to prevent infinite loops
+    iteration = 0
+
     try:
-        # Get transaction signatures
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getSignaturesForAddress",
-            "params": [
-                address,
-                {
-                    "limit": 100  # Adjust as needed
-                }
-            ]
-        }
+        while iteration < max_iterations:
+            # Prepare params with pagination
+            params = {"limit": 1000, "commitment": "finalized"}
+            if before_signature:
+                params["before"] = before_signature
 
-        response = requests.post(alchemy_url, json=payload, timeout=10)
-        logger.info(f"Solana API response status: {response.status_code}")
-        if response.status_code != 200:
-            logger.error(f"Solana RPC error: {response.text}")
-            return []
-
-        signatures_data = response.json()
-        logger.info(f"Solana signatures response: {signatures_data}")
-        if 'error' in signatures_data:
-            logger.error(f"Solana RPC error: {signatures_data['error']}")
-            return []
-
-        if 'result' not in signatures_data:
-            logger.error("No results in Solana RPC response")
-            return []
-
-        logger.info(f"Found {len(signatures_data['result'])} signatures for address {address}")
-
-        # Get transaction details
-        transactions = []
-
-        for sig_info in signatures_data['result']:
-            sig = sig_info['signature']
-
-            # Get transaction details
-            tx_payload = {
+            # Get signatures for the address
+            signatures_payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
-                "method": "getTransaction",
-                "params": [
-                    sig,
-                    {
-                        "encoding": "json",
-                        "maxSupportedTransactionVersion": 0
-                    }
-                ]
+                "method": "getSignaturesForAddress",
+                "params": [address, params]
             }
 
-            tx_response = requests.post(alchemy_url, json=tx_payload, timeout=10)
-            if tx_response.status_code != 200:
-                logger.error(f"Solana RPC error: {tx_response.text}")
-                continue
+            response = requests.post(alchemy_url, json=signatures_payload, timeout=30)
+            logger.info(f"Solana signatures API response status: {response.status_code}, iteration: {iteration}")
 
-            tx_data = tx_response.json()
-            if 'error' in tx_data:
-                logger.error(f"Solana RPC error: {tx_data['error']}")
-                continue
+            if response.status_code != 200:
+                logger.error(f"Solana signatures API error: {response.text}")
+                break
 
-            if 'result' not in tx_data or not tx_data['result']:
-                continue
+            signatures_data = response.json()
+            if 'error' in signatures_data:
+                logger.error(f"Solana signatures RPC error: {signatures_data['error']}")
+                break
 
-            result = tx_data['result']
+            if 'result' not in signatures_data or not signatures_data['result']:
+                logger.info(f"No more transaction signatures found at iteration {iteration}")
+                break
 
-            # Extract basic transaction info
-            timestamp = datetime.fromtimestamp(result['blockTime'], tz=timezone.utc) if 'blockTime' in result else django_timezone.now()
+            signatures = signatures_data['result']
+            logger.info(f"Found {len(signatures)} transaction signatures in iteration {iteration}")
 
-            # Process transaction
-            # Solana transaction parsing is more complex than Ethereum
-            # This is a simplified version that extracts basic token transfers
+            # If we got signatures, set the before parameter for the next iteration
+            if signatures:
+                before_signature = signatures[-1]['signature']
 
-            # Check if it's a token transfer (simplified)
-            # In a real implementation, more parsing logic would be needed
-            if 'meta' in result and 'postTokenBalances' in result['meta'] and 'preTokenBalances' in result['meta']:
-                pre_balances = {b['accountIndex']: b for b in result['meta']['preTokenBalances']} if result['meta']['preTokenBalances'] else {}
-                post_balances = {b['accountIndex']: b for b in result['meta']['postTokenBalances']} if result['meta']['postTokenBalances'] else {}
+            # Process this batch of signatures
+            batch_transactions = []
 
-                # Find token transfers by comparing pre and post balances
-                for account_index, post_balance in post_balances.items():
-                    pre_balance = pre_balances.get(account_index, {'uiTokenAmount': {'amount': '0'}})
+            for sig_info in signatures:
+                try:
+                    signature = sig_info['signature']
+                    block_time = sig_info.get('blockTime')
 
-                    pre_amount = Decimal(pre_balance.get('uiTokenAmount', {}).get('amount', '0')) / Decimal(10**9)
-                    post_amount = Decimal(post_balance.get('uiTokenAmount', {}).get('amount', '0')) / Decimal(10**9)
+                    # Skip if there's an error in the transaction
+                    if sig_info.get('err'):
+                        logger.debug(f"Skipping errored transaction: {signature}")
+                        continue
 
-                    # If balance increased, it's likely a buy
-                    if post_amount > pre_amount and post_balance.get('owner') == address:
-                        amount = post_amount - pre_amount
-                        mint = post_balance.get('mint', '')
+                    if not block_time:
+                        logger.debug(f"Skipping transaction without timestamp: {signature}")
+                        continue  # Skip transactions without timestamps
 
-                        # Get token symbol (simplified - in reality would use token registry)
-                        token_symbol = 'SOL'  # Default
-                        if 'symbol' in post_balance.get('uiTokenAmount', {}):
-                            token_symbol = post_balance['uiTokenAmount']['symbol']
+                    # Get parsed transaction details using jsonParsed encoding
+                    tx_payload = {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getTransaction",
+                        "params": [
+                            signature,
+                            {
+                                "encoding": "jsonParsed",  # Key: Use jsonParsed for automatic SPL parsing
+                                "maxSupportedTransactionVersion": 0,
+                                "commitment": "finalized"
+                            }
+                        ]
+                    }
 
-                        # Get price and value
-                        price_usd = fetch_price_data(token_symbol)
-                        value_usd = amount * price_usd
+                    tx_response = requests.post(alchemy_url, json=tx_payload, timeout=30)
+                    if tx_response.status_code != 200:
+                        logger.warning(f"Failed to fetch transaction {signature}: {tx_response.status_code}")
+                        continue
 
-                        transactions.append({
-                            'transaction_hash': sig,
-                            'timestamp': timestamp,
-                            'transaction_type': 'buy',
-                            'asset_symbol': token_symbol,
-                            'amount': amount,
-                            'price_usd': price_usd,
-                            'value_usd': value_usd,
-                            'fee_usd': Decimal(str(result['meta']['fee'] / 10**9)) * fetch_price_data('SOL')
-                        })
+                    tx_data = tx_response.json()
+                    if 'error' in tx_data:
+                        logger.warning(f"Transaction fetch error for {signature}: {tx_data['error']}")
+                        continue
 
-                    # If balance decreased, it's likely a sell
-                    elif post_amount < pre_amount and pre_balance.get('owner') == address:
-                        amount = pre_amount - post_amount
-                        mint = pre_balance.get('mint', '')
+                    if 'result' not in tx_data or not tx_data['result']:
+                        continue
 
-                        # Get token symbol
-                        token_symbol = 'SOL'  # Default
-                        if 'symbol' in pre_balance.get('uiTokenAmount', {}):
-                            token_symbol = pre_balance['uiTokenAmount']['symbol']
+                    parsed_tx = tx_data['result']
 
-                        # Get price and value
-                        price_usd = fetch_price_data(token_symbol)
-                        value_usd = amount * price_usd
+                    # Parse the transaction for tax-relevant data
+                    parsed_transactions = parse_solana_tax_transaction(parsed_tx, address, signature, block_time)
+                    batch_transactions.extend(parsed_transactions)
 
-                        transactions.append({
-                            'transaction_hash': sig,
-                            'timestamp': timestamp,
-                            'transaction_type': 'sell',
-                            'asset_symbol': token_symbol,
-                            'amount': amount,
-                            'price_usd': price_usd,
-                            'value_usd': value_usd,
-                            'fee_usd': Decimal(str(result['meta']['fee'] / 10**9)) * fetch_price_data('SOL')
-                        })
+                    # Rate limiting: small delay between requests
+                    time.sleep(0.05)  # Reduced delay for better performance
 
-        # Sort by timestamp
-        transactions.sort(key=lambda x: x['timestamp'])
+                except Exception as e:
+                    logger.error(f"Error processing transaction {sig_info.get('signature', 'unknown')}: {str(e)}")
+                    continue
 
-        logger.info(f"Returning {len(transactions)} processed Solana transactions for address {address}")
-        return transactions
+            # Add batch transactions to all transactions
+            all_transactions.extend(batch_transactions)
+
+            # If we got fewer than the limit, we've reached the end
+            if len(signatures) < 1000:
+                logger.info("Reached end of transaction history")
+                break
+
+            iteration += 1
+
+            # Add a small delay between batches
+            time.sleep(0.5)
+
+        # Sort all transactions by timestamp (oldest first)
+        all_transactions.sort(key=lambda x: x['timestamp'])
+
+        logger.info(f"Successfully processed {len(all_transactions)} tax-relevant transactions for address {address}")
+        return all_transactions
 
     except Exception as e:
-        logger.error(f"Error fetching Solana transactions: {str(e)}", exc_info=True)
-        return []
+        logger.error(f"Critical error in fetch_solana_transactions: {str(e)}", exc_info=True)
+        return all_transactions if all_transactions else []
+
+
+def parse_solana_tax_transaction(parsed_tx, user_address, signature, block_time):
+    """
+    Parse a Solana transaction for tax-relevant information using proper Alchemy parsed data
+    Enhanced to handle staking, rewards, and all transaction types
+    """
+    transactions = []
+
+    try:
+        timestamp = datetime.fromtimestamp(block_time, tz=timezone.utc)
+        fee_lamports = parsed_tx.get('meta', {}).get('fee', 0)
+        fee_sol = Decimal(fee_lamports) / Decimal(10**9)  # Convert lamports to SOL
+
+        # Get SOL price for fee calculation
+        # TODO: Replace with historical price fetching
+        sol_price = fetch_price_data('SOL')
+        fee_usd = fee_sol * Decimal(sol_price) if fee_sol > 0 else Decimal('0')
+
+        instructions = parsed_tx.get('transaction', {}).get('message', {}).get('instructions', [])
+
+        # Get pre/post balances to detect SOL transfers
+        account_keys = parsed_tx.get('transaction', {}).get('message', {}).get('accountKeys', [])
+        pre_balances = parsed_tx.get('meta', {}).get('preBalances', [])
+        post_balances = parsed_tx.get('meta', {}).get('postBalances', [])
+
+        # Find user's account index
+        user_account_index = None
+        for i, account_key in enumerate(account_keys):
+            account_pubkey = account_key.get('pubkey') if isinstance(account_key, dict) else account_key
+            if account_pubkey == user_address:
+                user_account_index = i
+                break
+
+        # Track if we've processed any transfers to avoid duplicates
+        processed_transfer = False
+
+        # Check for native SOL balance changes first
+        if user_account_index is not None and user_account_index < len(pre_balances) and user_account_index < len(post_balances):
+            pre_balance_lamports = pre_balances[user_account_index]
+            post_balance_lamports = post_balances[user_account_index]
+            balance_change_lamports = post_balance_lamports - pre_balance_lamports
+
+            # Account for fees paid (only deducted from the fee payer)
+            # The first signer usually pays the fee
+            if user_account_index == 0 and fee_lamports > 0:
+                balance_change_lamports += fee_lamports
+
+            if abs(balance_change_lamports) > 100:  # Ignore tiny dust amounts
+                sol_amount = abs(Decimal(balance_change_lamports) / Decimal(10**9))
+
+                # Determine transaction type based on balance change and instructions
+                tx_type = 'buy' if balance_change_lamports > 0 else 'sell'
+
+                # Check for staking operations
+                for instruction in instructions:
+                    program = instruction.get('program', '')
+                    parsed = instruction.get('parsed', {})
+                    if 'stake' in program.lower() or 'stake' in str(parsed).lower():
+                        if balance_change_lamports < 0:
+                            tx_type = 'stake'
+                        else:
+                            tx_type = 'unstake'
+                        break
+                    elif 'vote' in program.lower() or 'reward' in str(parsed).lower():
+                        if balance_change_lamports > 0:
+                            tx_type = 'reward'
+                        break
+
+                value_usd = sol_amount * Decimal(sol_price)
+
+                transactions.append({
+                    'transaction_hash': signature,
+                    'timestamp': timestamp,
+                    'transaction_type': tx_type,
+                    'asset_symbol': 'SOL',
+                    'amount': sol_amount,
+                    'price_usd': Decimal(sol_price),
+                    'value_usd': value_usd,
+                    'fee_usd': fee_usd
+                })
+                processed_transfer = True
+
+        # Parse each instruction for additional transfers (SPL tokens)
+        for instruction in instructions:
+            parsed_info = instruction.get('parsed')
+            program = instruction.get('program')
+
+            if not parsed_info:
+                continue
+
+            # Handle SPL Token transfers
+            if program == 'spl-token' and parsed_info.get('type') in ['transfer', 'transferChecked']:
+                info = parsed_info.get('info', {})
+                authority = info.get('authority')
+                source = info.get('source')
+                destination = info.get('destination')
+                amount = info.get('amount')
+
+                # Check if user is involved in this transfer
+                if authority == user_address or source == user_address or destination == user_address:
+                    # Handle token amount and decimals
+                    if parsed_info.get('type') == 'transferChecked':
+                        token_decimals = info.get('tokenAmount', {}).get('decimals', 0)
+                        token_amount = Decimal(info.get('tokenAmount', {}).get('amount', 0)) / Decimal(10**token_decimals)
+                    else:
+                        # For regular transfer, amount might need decimals handling
+                        token_amount = amount
+                        if isinstance(token_amount, str):
+                            # Assume raw amount without decimals conversion
+                            # This might need adjustment based on specific token
+                            token_amount = Decimal(token_amount) / Decimal(10**9)  # Default to 9 decimals
+
+                    # Skip dust amounts
+                    if token_amount < Decimal('0.000001'):
+                        continue
+
+                    # Determine transaction type based on user involvement
+                    if authority == user_address or source == user_address:
+                        tx_type = 'sell' if destination != user_address else 'transfer'
+                    else:
+                        tx_type = 'buy'
+
+                    # Try to get token mint address for better identification
+                    mint_address = info.get('mint', 'UNKNOWN')
+
+                    # Map known SPL tokens (expand this list as needed)
+                    token_map = {
+                        'So11111111111111111111111111111111111111112': 'wSOL',  # Wrapped SOL
+                        'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
+                        'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
+                        # Add more token mints as needed
+                    }
+
+                    token_symbol = token_map.get(mint_address, f'SPL-{mint_address[:6]}')
+
+                    # Get price (use placeholder for unknown tokens)
+                    if token_symbol in ['USDC', 'USDT']:
+                        price_usd = Decimal('1.00')  # Stablecoins
+                    elif token_symbol == 'wSOL':
+                        price_usd = Decimal(sol_price)  # Wrapped SOL has same price as SOL
+                    else:
+                        price_usd = Decimal('0.01')  # TODO: Implement token price lookup
+
+                    value_usd = token_amount * price_usd
+
+                    transactions.append({
+                        'transaction_hash': signature,
+                        'timestamp': timestamp,
+                        'transaction_type': tx_type,
+                        'asset_symbol': token_symbol,
+                        'amount': token_amount,
+                        'price_usd': price_usd,
+                        'value_usd': value_usd,
+                        'fee_usd': fee_usd if not processed_transfer else Decimal('0')  # Only add fee once per tx
+                    })
+                    processed_transfer = True
+
+            # Handle native SOL transfers (only if not already processed via balance change)
+            elif program == 'system' and parsed_info.get('type') == 'transfer' and not processed_transfer:
+                info = parsed_info.get('info', {})
+                source = info.get('source')
+                destination = info.get('destination')
+                lamports = info.get('lamports', 0)
+
+                # Check if user is involved
+                if source == user_address or destination == user_address:
+                    sol_amount = Decimal(lamports) / Decimal(10**9)  # Convert lamports to SOL
+
+                    # Skip dust amounts
+                    if sol_amount < Decimal('0.000001'):
+                        continue
+
+                    # Determine transaction type
+                    if source == user_address:
+                        tx_type = 'sell' if destination != user_address else 'transfer'
+                    else:
+                        tx_type = 'buy'
+
+                    value_usd = sol_amount * Decimal(sol_price)
+
+                    transactions.append({
+                        'transaction_hash': signature,
+                        'timestamp': timestamp,
+                        'transaction_type': tx_type,
+                        'asset_symbol': 'SOL',
+                        'amount': sol_amount,
+                        'price_usd': Decimal(sol_price),
+                        'value_usd': value_usd,
+                        'fee_usd': fee_usd if not processed_transfer else Decimal('0')  # Only add fee once per tx
+                    })
+                    processed_transfer = True
+
+        # If no specific transfers found but user paid significant fees, record as a transaction fee
+        if not transactions and fee_usd > Decimal('0.01'):  # Only record if fee is more than 1 cent
+            transactions.append({
+                'transaction_hash': signature,
+                'timestamp': timestamp,
+                'transaction_type': 'fee',
+                'asset_symbol': 'SOL',
+                'amount': fee_sol,
+                'price_usd': Decimal(sol_price),
+                'value_usd': fee_usd,
+                'fee_usd': fee_usd
+            })
+
+    except Exception as e:
+        logger.error(f"Error parsing transaction {signature}: {str(e)}")
+
+    return transactions
 
 
 def fetch_arbitrum_transactions(address):
