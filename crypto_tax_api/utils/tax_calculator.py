@@ -21,9 +21,14 @@ def calculate_cost_basis_fifo(wallet, asset_symbol, sell_amount, sell_date):
         sell_date: Date of the sale
 
     Returns:
-        tuple: (cost_basis, realized_profit_loss)
+        tuple: (cost_basis, realized_profit_loss) or raises ValueError for invalid scenarios
     """
     from ..models import Transaction
+    from decimal import Decimal
+    import logging
+    from django.db.models import Sum
+
+    logger = logging.getLogger(__name__)
 
     # Get all buy transactions for this asset, ordered by date (oldest first)
     buy_transactions = Transaction.objects.filter(
@@ -36,15 +41,10 @@ def calculate_cost_basis_fifo(wallet, asset_symbol, sell_amount, sell_date):
     remaining_sell_amount = Decimal(str(sell_amount))
     total_cost_basis = Decimal('0.00')
 
-    # If no buy transactions found, can't calculate cost basis
+    # If no buy transactions found, raise an exception - this is an invalid state in real applications
     if not buy_transactions.exists():
-        logger.warning(f"No buy transactions found for {wallet} {asset_symbol}")
-
-        # For UI testing, use the sell price as the cost basis (no profit/loss)
-        # In a real app, you might want to handle this differently
-        from .blockchain_apis import fetch_price_data
-        current_price = fetch_price_data(asset_symbol)
-        return sell_amount * current_price, Decimal('0.00')
+        logger.error(f"No buy transactions found for {wallet} {asset_symbol} - cannot calculate cost basis")
+        raise ValueError(f"No prior purchase records found for {asset_symbol}. Cannot calculate cost basis.")
 
     # Process each buy transaction until we've covered the sell amount
     for tx in buy_transactions:
@@ -77,26 +77,18 @@ def calculate_cost_basis_fifo(wallet, asset_symbol, sell_amount, sell_date):
         # Reduce remaining sell amount
         remaining_sell_amount -= use_amount
 
-    # If we couldn't find enough buys to cover the sell, use the available portion
+    # If we couldn't find enough buys to cover the sell, this is a problem in a real app
     if remaining_sell_amount > 0:
-        logger.warning(f"Not enough buy transactions to cover sell for {wallet} {asset_symbol}")
-
-        # For the remaining amount, use current price as cost basis (no profit/loss)
-        # This is a simplified approach for UI testing
-        from .blockchain_apis import fetch_price_data
-        current_price = fetch_price_data(asset_symbol)
-        remaining_cost_basis = remaining_sell_amount * current_price
-        total_cost_basis += remaining_cost_basis
+        logger.error(f"Insufficient buy transactions to cover sell of {sell_amount} {asset_symbol} for {wallet}")
+        raise ValueError(f"Insufficient purchase records to cover the sale of {sell_amount} {asset_symbol}. " +
+                         f"Missing records for {remaining_sell_amount} {asset_symbol}.")
 
     # Calculate sell value and profit/loss
-    covered_sell_amount = sell_amount
-
-    # Get latest price for the asset
     from .blockchain_apis import fetch_price_data
     current_price = fetch_price_data(asset_symbol)
 
     # Calculate sell value based on covered amount
-    sell_value = covered_sell_amount * current_price
+    sell_value = (sell_amount - remaining_sell_amount) * current_price
 
     # Calculate realized profit/loss
     realized_profit_loss = sell_value - total_cost_basis

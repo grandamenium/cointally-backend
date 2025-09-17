@@ -12,6 +12,10 @@ https://docs.djangoproject.com/en/3.2/ref/settings/
 
 from pathlib import Path
 
+import dj_database_url
+from corsheaders.defaults import default_headers
+from cryptography.fernet import Fernet
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -19,16 +23,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/3.2/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-_8+#sp_9d!oos+^l--(--h#&x%%p9m9(jqcrn5x1j@&uy4)=g@'
-
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
-
-ALLOWED_HOSTS = []
-
-
-# Application definition
 
 
 """
@@ -43,11 +39,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-key-for-dev-only')
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get('DEBUG', 'True') == 'True'
-
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
 # Application definition
 INSTALLED_APPS = [
@@ -64,10 +55,27 @@ INSTALLED_APPS = [
 
     # Local apps
     'crypto_tax_api',
+    'channels'
 ]
+
+# Set the ASGI application to use the one from asgi.py
+ASGI_APPLICATION = 'crypto_tax_project.asgi.application'
+
+# Configure channel layers (for WebSocket communication)
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {
+            "hosts": [('127.0.0.1', 6379)],
+            "capacity": 1500,  # Maximum number of messages that can be in a channel layer
+            "expiry": 60,  # Message expiry time in seconds
+        },
+    },
+}
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # Added for Whitenoise
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -76,6 +84,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
 
 ROOT_URLCONF = 'crypto_tax_project.urls'
 
@@ -107,6 +116,10 @@ DATABASES = {
         'NAME': BASE_DIR / 'db.sqlite3',
     }
 }
+
+# Heroku database configuration - this will use the DATABASE_URL environment variable
+db_from_env = dj_database_url.config(conn_max_age=600)
+DATABASES['default'].update(db_from_env)
 
 
 # Password validation
@@ -146,13 +159,19 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/3.2/howto/static-files/
 
 STATIC_URL = '/static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR, 'static'),
+]
+
+# Whitenoise configuration
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/3.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
 
 REST_FRAMEWORK = {
@@ -179,10 +198,69 @@ SIMPLE_JWT = {
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
 }
 
+# Enhanced security settings
+SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_HSTS_SECONDS = 31536000 if not DEBUG else 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SECURE_HSTS_PRELOAD = True
+X_FRAME_OPTIONS = 'DENY'
+
+# API rate limiting
+REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
+    'anon': '100/hour',
+    'user': '1000/hour',
+    'exchange_sync': '10/hour',  # Limit exchange sync requests
+    'form_generation': '50/hour',  # Limit tax form generation
+}
+
+# # Add custom throttle classes
+# REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = [
+#     'rest_framework.throttling.AnonRateThrottle',
+#     'rest_framework.throttling.UserRateThrottle',
+#     'crypto_tax_api.throttles.ExchangeSyncThrottle',
+#     'crypto_tax_api.throttles.FormGenerationThrottle',
+# ]
+
 # CORS settings
+CORS_ALLOW_ALL_ORIGINS = False  # Only for development
+
+# OR if you want to control it better (in production) use this instead of CORS_ALLOW_ALL_ORIGINS:
 CORS_ALLOWED_ORIGINS = [
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
+    "https://crypto-tax-app-ip1x.vercel.app",  # Remove trailing slash
+    "http://localhost:3000",  # For local development
+    "http://127.0.0.1:3000",  # For local development
+]
+
+# Allow necessary headers
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
+
+# Allow necessary methods
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
+
+# Update ALLOWED_HOSTS to ensure your domain is included
+ALLOWED_HOSTS = [
+    'crypto-tax-backend-f37681c1d68a.herokuapp.com',
+    'crypto-tax-app-ip1x.vercel.app',
+    'localhost',
+    '127.0.0.1',
 ]
 
 CORS_ALLOW_CREDENTIALS = True
@@ -190,15 +268,33 @@ CORS_ALLOW_CREDENTIALS = True
 # Crypto API Keys (should be moved to environment variables in production)
 COVALENT_API_KEY = os.environ.get('COVALENT_API_KEY', '')
 ALCHEMY_API_KEY = os.environ.get('ALCHEMY_API_KEY', '')
-SOLANA_RPC_URL = os.environ.get('SOLANA_RPC_URL', 'https://api.mainnet-beta.solana.com')
+
+# Encryption key must be set in environment variables
+ENCRYPTION_KEY = 'O-ILu6xhk5m2f9bylytB3oC5DKLSIIgfuKcD0sqcwwc='
 
 # Cache settings
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'crypto-tax-cache',
+        'BACKEND': 'django_redis.cache.RedisCache',
+        'LOCATION': 'redis://127.0.0.1:6379/0',
+        'OPTIONS': {
+            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            'SOCKET_CONNECT_TIMEOUT': 5,  # seconds
+            'SOCKET_TIMEOUT': 5,  # seconds
+            'COMPRESSOR': 'django_redis.compressors.zlib.ZlibCompressor',
+            'IGNORE_EXCEPTIONS': True,  # Redis is used for caching, so failing gracefully is acceptable
+        },
+        'KEY_PREFIX': 'crypto_tax'  # Prefix all keys to avoid collisions
     }
 }
+
+# Use Redis for session storage as well
+SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
+SESSION_CACHE_ALIAS = 'default'
+
+# Use Redis as the broker for Celery tasks (if using Celery in the future)
+# CELERY_BROKER_URL = 'redis://127.0.0.1:6379/1'
+# CELERY_RESULT_BACKEND = 'redis://127.0.0.1:6379/1'
 
 # Logging configuration
 LOGGING = {
@@ -230,3 +326,87 @@ LOGGING = {
         },
     },
 }
+
+AUTH_USER_MODEL = 'crypto_tax_api.User'
+
+REDIS_URL = os.environ.get('REDIS_URL')
+
+if REDIS_URL:
+    # Production - Heroku Redis
+    print(f"Using Redis URL: {REDIS_URL[:20]}...")
+
+    # For Heroku Redis, we need to handle SSL properly
+    # Method 1: Use the URL directly with SSL cert requirements disabled
+    redis_url_with_ssl_disabled = REDIS_URL
+    if '?' in REDIS_URL:
+        redis_url_with_ssl_disabled += '&ssl_cert_reqs=none'
+    else:
+        redis_url_with_ssl_disabled += '?ssl_cert_reqs=none'
+
+    # Channel Layers configuration for production
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {
+                'hosts': [redis_url_with_ssl_disabled],  # Pass as string, not tuple
+                'capacity': 1500,
+                'expiry': 60,
+                'group_expiry': 86400,
+            },
+        },
+    }
+
+    # Cache configuration for production
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': redis_url_with_ssl_disabled,  # Use the same URL with SSL disabled
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+                'CONNECTION_POOL_KWARGS': {
+                    'ssl_cert_reqs': None,
+                    'retry_on_timeout': True,
+                    'health_check_interval': 30,
+                },
+                'SOCKET_CONNECT_TIMEOUT': 5,
+                'SOCKET_TIMEOUT': 5,
+                'IGNORE_EXCEPTIONS': True,
+            },
+            'KEY_PREFIX': 'crypto_tax'
+        }
+    }
+
+else:
+    # Development - Local Redis
+    print("Using local Redis")
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {
+                'hosts': ['redis://127.0.0.1:6379/0'],  # Use string format
+                'capacity': 1500,
+                'expiry': 60,
+            },
+        },
+    }
+
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': 'redis://127.0.0.1:6379/0',
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+                'SOCKET_CONNECT_TIMEOUT': 5,
+                'SOCKET_TIMEOUT': 5,
+                'COMPRESSOR': 'django_redis.compressors.zlib.ZlibCompressor',
+                'IGNORE_EXCEPTIONS': True,
+            },
+            'KEY_PREFIX': 'crypto_tax'
+        }
+    }
+
+# Coinbase OAuth Configuration
+COINBASE_CLIENT_ID = os.environ.get('COINBASE_CLIENT_ID', '')
+COINBASE_CLIENT_SECRET = os.environ.get('COINBASE_CLIENT_SECRET', '')
+COINBASE_REDIRECT_URI = os.environ.get('COINBASE_REDIRECT_URI', 'http://localhost:3000/oauth/coinbase/callback')
+
