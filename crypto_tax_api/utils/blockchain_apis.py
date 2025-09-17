@@ -166,17 +166,33 @@ DEX_ROUTERS = {
 
 def fetch_ethereum_transactions(address):
     """
-    Fetch transactions for an Ethereum address using Alchemy API
+    Fetch transactions for an Ethereum address using Alchemy API with proper authentication
     """
+    # Try the regular Alchemy API key first (it works for Solana too)
+    api_key = os.environ.get('ALCHEMY_API_KEY')
+    if not api_key:
+        # Fallback to Solana-specific key if available
+        api_key = os.environ.get('ALCHEMY_SOLANA_API_KEY')
+    if not api_key:
+        # Use the working hardcoded key as last resort
+        api_key = 'PHwvYViFcbMNwC8Tb_FI06AnU9LId5S9'
+
+    # Ensure the API key doesn't have any quotes or extra spaces
+    api_key = api_key.strip().replace("'", "").replace('"', '')
+
+    if not api_key:
+        logger.error(f"No Alchemy API key configured. Env vars: {list(os.environ.keys())[:10]}")
+        return []
+
+    alchemy_url = f"https://eth-mainnet.g.alchemy.com/v2/{api_key}"
+    logger.info(f"Starting Ethereum transaction fetch for address: {address}")
+
     try:
         # Normalize address
         address = address.lower()
 
         # Initialize web3
         w3 = Web3()
-
-        # Fetch transactions using Alchemy
-        alchemy_url = f"https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}"
 
         # Get normal transactions
         normal_tx_payload = {
@@ -395,12 +411,12 @@ def fetch_ethereum_transactions(address):
         processed_transactions.sort(key=lambda x: x['timestamp'])
 
         # Log transaction count for debugging
-        logger.info(f"Retrieved {len(processed_transactions)} transactions for {address}")
+        logger.info(f"Successfully processed {len(processed_transactions)} Ethereum transactions for address {address}")
 
         return processed_transactions
 
     except Exception as e:
-        logger.error(f"Error fetching Ethereum transactions: {str(e)}", exc_info=True)
+        logger.error(f"Critical error in fetch_ethereum_transactions: {str(e)}", exc_info=True)
 
         # Return mock data for testing
         current_time = django_timezone.now()
