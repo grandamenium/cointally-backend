@@ -178,7 +178,7 @@ def fetch_ethereum_transactions(address):
 
     # Endpoint Construction
     alchemy_url = ALCHEMY_ENDPOINTS['ethereum'].format(api_key=api_key)
-    logger.info(f"Starting Ethereum transaction fetch for address: {address}")
+    logger.info(f"ETHEREUM_FETCH_START: address={address[:10]}...{address[-6:]}, api_key=***{api_key[-4:]}")
 
     try:
         # Normalize address
@@ -409,40 +409,22 @@ def fetch_ethereum_transactions(address):
         return processed_transactions
 
     except Exception as e:
-        logger.error(f"Critical error in fetch_ethereum_transactions: {str(e)}", exc_info=True)
+        logger.error(f"ETHEREUM_FETCH_ERROR: {str(e)}", exc_info=True)
 
-        # Return mock data for testing
-        current_time = django_timezone.now()
+        # Classify the error type for better user feedback
+        error_message = str(e).lower()
+        if 'timeout' in error_message or 'connection' in error_message:
+            raise ConnectionError(f"Network timeout while fetching Ethereum transactions. Please try again later.")
+        elif 'unauthorized' in error_message or '401' in error_message:
+            raise PermissionError(f"Invalid API key for Ethereum blockchain access.")
+        elif 'rate limit' in error_message or '429' in error_message:
+            raise ConnectionError(f"API rate limit exceeded. Please wait a moment and try again.")
+        elif 'not found' in error_message or '404' in error_message:
+            raise ValueError(f"Ethereum address not found or invalid: {address[:10]}...{address[-6:]}")
+        else:
+            raise RuntimeError(f"Failed to fetch Ethereum transactions: {str(e)}")
 
-        # Mock buy transactions
-        buy_txs = [
-            {
-                'transaction_hash': f'0xbuymock{i}',
-                'timestamp': current_time.replace(day=i, month=1, hour=12),
-                'transaction_type': 'buy',
-                'asset_symbol': 'ETH',
-                'amount': Decimal('0.5'),
-                'price_usd': Decimal('2800.00'),
-                'value_usd': Decimal('1400.00'),
-                'fee_usd': Decimal('10.00')
-            } for i in range(1, 6)
-        ]
-
-        # Mock sell transactions
-        sell_txs = [
-            {
-                'transaction_hash': f'0xsellmock{i}',
-                'timestamp': current_time.replace(day=i, month=3, hour=14),
-                'transaction_type': 'sell',
-                'asset_symbol': 'ETH',
-                'amount': Decimal('0.25'),
-                'price_usd': Decimal('3000.00'),
-                'value_usd': Decimal('750.00'),
-                'fee_usd': Decimal('12.00')
-            } for i in range(1, 4)
-        ]
-
-        return buy_txs + sell_txs
+        # Note: No mock data returned - let the calling function handle the error appropriately
 
 
 def fetch_solana_transactions(address):
@@ -1754,22 +1736,29 @@ def fetch_multiple_chain_transactions(wallet):
     """
     Fetch transactions from multiple chains
     """
-    logger.info(f"FETCH_MULTIPLE_CHAIN_TRANSACTIONS called for wallet: {wallet.address}, chain: {wallet.chain}")
+    logger.info(f"FETCH_MULTIPLE_CHAIN_TRANSACTIONS: Starting fetch for wallet={wallet.address[:10]}...{wallet.address[-6:]}, chain={wallet.chain}")
     transactions = []
 
-    if wallet.chain == 'ethereum':
-        transactions = fetch_ethereum_transactions(wallet.address)
-    elif wallet.chain == 'solana':
-        transactions = fetch_solana_transactions(wallet.address)
-    elif wallet.chain == 'arbitrum':
-        transactions = fetch_arbitrum_transactions(wallet.address)
-    elif wallet.chain == 'bsc':
-        transactions = fetch_bsc_transactions(wallet.address)
-    else:
-        # Default to Ethereum if chain is unknown
-        transactions = fetch_ethereum_transactions(wallet.address)
+    try:
+        if wallet.chain == 'ethereum':
+            transactions = fetch_ethereum_transactions(wallet.address)
+        elif wallet.chain == 'solana':
+            transactions = fetch_solana_transactions(wallet.address)
+        elif wallet.chain == 'arbitrum':
+            transactions = fetch_arbitrum_transactions(wallet.address)
+        elif wallet.chain == 'bsc':
+            transactions = fetch_bsc_transactions(wallet.address)
+        else:
+            logger.warning(f"UNKNOWN_CHAIN: {wallet.chain}, defaulting to Ethereum")
+            # Default to Ethereum if chain is unknown
+            transactions = fetch_ethereum_transactions(wallet.address)
 
-    # Sort by timestamp
-    transactions.sort(key=lambda x: x['timestamp'])
+        # Sort by timestamp
+        transactions.sort(key=lambda x: x['timestamp'])
+        logger.info(f"FETCH_MULTIPLE_CHAIN_TRANSACTIONS_SUCCESS: Found {len(transactions)} transactions for {wallet.chain} wallet")
+
+    except Exception as e:
+        logger.error(f"FETCH_MULTIPLE_CHAIN_TRANSACTIONS_ERROR: chain={wallet.chain}, error={str(e)}")
+        raise
 
     return transactions

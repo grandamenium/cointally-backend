@@ -71,7 +71,10 @@ class WalletViewSet(viewsets.ModelViewSet):
         address = request.data.get('address')
         chain = request.data.get('chain', 'ethereum')  # Default to Ethereum
 
+        logger.info(f"WALLET_ANALYZE_REQUEST: address={address[:10]}...{address[-6:] if address else None}, chain={chain}")
+
         if not address:
+            logger.warning("WALLET_ANALYZE_ERROR: No address provided")
             return Response(
                 {"error": "Wallet address is required."},
                 status=status.HTTP_400_BAD_REQUEST
@@ -80,21 +83,70 @@ class WalletViewSet(viewsets.ModelViewSet):
         # Normalize address format
         if chain == 'ethereum' or chain == 'polygon' or chain == 'arbitrum' or chain == 'bsc':
             address = address.lower()
+            logger.info(f"WALLET_ADDRESS_NORMALIZED: {address[:10]}...{address[-6:]} for chain {chain}")
 
         # Check if wallet exists in our database
         try:
             wallet = Wallet.objects.get(address=address, chain=chain)
+            logger.info(f"WALLET_EXISTS: Found existing wallet for {address[:10]}...{address[-6:]}")
             # If wallet exists, check if we need to update data
             last_updated = wallet.last_updated
             current_time = timezone.now()
+            tx_count = wallet.transactions.count()
 
             # If wallet data is older than 1 hour OR no transactions exist, update it
-            if (current_time - last_updated).total_seconds() > 3600 or wallet.transactions.count() == 0:
-                error_txs = self._fetch_and_process_transactions(wallet)
+            if (current_time - last_updated).total_seconds() > 3600 or tx_count == 0:
+                logger.info(f"WALLET_UPDATE_NEEDED: Last updated {last_updated}, tx_count={tx_count}")
+                try:
+                    error_txs = self._fetch_and_process_transactions(wallet)
+                except ConnectionError as e:
+                    return Response(
+                        {"error": "Connection Error", "message": str(e), "retry": True},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE
+                    )
+                except PermissionError as e:
+                    return Response(
+                        {"error": "Authentication Error", "message": str(e), "retry": False},
+                        status=status.HTTP_401_UNAUTHORIZED
+                    )
+                except ValueError as e:
+                    return Response(
+                        {"error": "Invalid Address", "message": str(e), "retry": False},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                except RuntimeError as e:
+                    return Response(
+                        {"error": "Processing Error", "message": str(e), "retry": True},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+            else:
+                logger.info(f"WALLET_CACHE_HIT: Using cached data, tx_count={tx_count}")
         except Wallet.DoesNotExist:
+            logger.info(f"WALLET_NEW: Creating new wallet for {address[:10]}...{address[-6:]}")
             # Create new wallet and fetch transactions
             wallet = Wallet.objects.create(address=address, chain=chain)
-            error_txs = self._fetch_and_process_transactions(wallet)
+            try:
+                error_txs = self._fetch_and_process_transactions(wallet)
+            except ConnectionError as e:
+                return Response(
+                    {"error": "Connection Error", "message": str(e), "retry": True},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
+            except PermissionError as e:
+                return Response(
+                    {"error": "Authentication Error", "message": str(e), "retry": False},
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+            except ValueError as e:
+                return Response(
+                    {"error": "Invalid Address", "message": str(e), "retry": False},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            except RuntimeError as e:
+                return Response(
+                    {"error": "Processing Error", "message": str(e), "retry": True},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
 
         # Prepare response data
         transactions = wallet.transactions.all().order_by('-timestamp')
@@ -174,11 +226,85 @@ class WalletViewSet(viewsets.ModelViewSet):
 
         return Response(serializer.data)
 
+    @action(detail=False, methods=['post'])
+    def debug(self, request):
+        """
+        Debug endpoint to test API connectivity and validate addresses
+        """
+        address = request.data.get('address')
+        chain = request.data.get('chain', 'ethereum')
+
+        debug_info = {
+            'address_validation': {},
+            'api_connectivity': {},
+            'configuration': {},
+            'timestamp': timezone.now().isoformat()
+        }
+
+        # Test address validation
+        try:
+            from .serializers import WalletAddressSerializer
+            serializer = WalletAddressSerializer(data={'address': address, 'chain': chain})
+            if serializer.is_valid():
+                debug_info['address_validation']['status'] = 'valid'
+                debug_info['address_validation']['normalized_address'] = serializer.validated_data['address']
+            else:
+                debug_info['address_validation']['status'] = 'invalid'
+                debug_info['address_validation']['errors'] = serializer.errors
+        except Exception as e:
+            debug_info['address_validation']['status'] = 'error'
+            debug_info['address_validation']['error'] = str(e)
+
+        # Test API configuration
+        try:
+            from .utils.blockchain_apis import get_alchemy_api_key, ALCHEMY_ENDPOINTS
+
+            if chain in ['ethereum', 'arbitrum', 'polygon', 'bsc']:
+                api_key = get_alchemy_api_key()
+                debug_info['configuration']['api_key_present'] = bool(api_key)
+                debug_info['configuration']['api_key_length'] = len(api_key) if api_key else 0
+                debug_info['configuration']['endpoint'] = ALCHEMY_ENDPOINTS.get(chain, 'Not configured')
+            elif chain == 'solana':
+                api_key = get_alchemy_api_key('ALCHEMY_SOLANA_API_KEY')
+                debug_info['configuration']['solana_api_key_present'] = bool(api_key)
+                debug_info['configuration']['solana_api_key_length'] = len(api_key) if api_key else 0
+                debug_info['configuration']['endpoint'] = ALCHEMY_ENDPOINTS.get(chain, 'Not configured')
+        except Exception as e:
+            debug_info['configuration']['error'] = str(e)
+
+        # Test basic API connectivity (without making actual blockchain calls)
+        try:
+            import requests
+            test_url = "https://httpbin.org/get"
+            response = requests.get(test_url, timeout=5)
+            debug_info['api_connectivity']['internet'] = response.status_code == 200
+        except Exception as e:
+            debug_info['api_connectivity']['internet'] = False
+            debug_info['api_connectivity']['internet_error'] = str(e)
+
+        # Database connectivity test
+        try:
+            from .models import Wallet
+            wallet_count = Wallet.objects.count()
+            debug_info['api_connectivity']['database'] = True
+            debug_info['api_connectivity']['wallet_count'] = wallet_count
+        except Exception as e:
+            debug_info['api_connectivity']['database'] = False
+            debug_info['api_connectivity']['database_error'] = str(e)
+
+        logger.info(f"DEBUG_ENDPOINT: {debug_info}")
+
+        return Response(debug_info)
+
     def _fetch_and_process_transactions(self, wallet):
         """Fetch and process transactions for a wallet"""
         try:
+            logger.info(f"FETCH_TRANSACTIONS_START: wallet={wallet.address[:10]}...{wallet.address[-6:]}, chain={wallet.chain}")
+
             # Fetch transactions from blockchain APIs
             transactions = fetch_multiple_chain_transactions(wallet)
+
+            logger.info(f"FETCH_TRANSACTIONS_RESULT: Found {len(transactions)} transactions for wallet {wallet.address[:10]}...{wallet.address[-6:]}")
 
             # Process and store transactions
             self._process_transactions(wallet, transactions)
@@ -190,9 +316,20 @@ class WalletViewSet(viewsets.ModelViewSet):
             wallet.last_updated = timezone.now()
             wallet.save()
 
+            logger.info(f"WALLET_PROCESSING_COMPLETE: wallet={wallet.address[:10]}...{wallet.address[-6:]}")
+
+        except ConnectionError as e:
+            logger.error(f"FETCH_TRANSACTIONS_CONNECTION_ERROR: wallet={wallet.address[:10]}...{wallet.address[-6:]}, error={str(e)}")
+            raise ConnectionError(str(e))
+        except PermissionError as e:
+            logger.error(f"FETCH_TRANSACTIONS_PERMISSION_ERROR: wallet={wallet.address[:10]}...{wallet.address[-6:]}, error={str(e)}")
+            raise PermissionError(str(e))
+        except ValueError as e:
+            logger.error(f"FETCH_TRANSACTIONS_VALUE_ERROR: wallet={wallet.address[:10]}...{wallet.address[-6:]}, error={str(e)}")
+            raise ValueError(str(e))
         except Exception as e:
-            logger.error(f"Error fetching transactions for wallet {wallet.address}: {str(e)}")
-            raise
+            logger.error(f"FETCH_TRANSACTIONS_UNEXPECTED_ERROR: wallet={wallet.address[:10]}...{wallet.address[-6:]}, error={str(e)}")
+            raise RuntimeError(f"An unexpected error occurred while processing your wallet. Please try again later.")
 
     def _process_transactions(self, wallet, transactions):
         """Process and store transactions, calculating cost basis and realized gains"""

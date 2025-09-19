@@ -250,9 +250,44 @@ class WalletAddressSerializer(serializers.Serializer):
     chain = serializers.CharField(max_length=50)
 
     def validate_address(self, value):
-        # Basic validation - you can expand this based on your requirements
-        if len(value) < 10:  # Example validation
-            raise serializers.ValidationError("Address seems too short to be valid")
+        """
+        Validate wallet address format based on blockchain standards
+        """
+        import re
+
+        # Get the chain from the request data
+        chain = self.initial_data.get('chain', 'ethereum').lower()
+
+        if chain in ['ethereum', 'arbitrum', 'polygon', 'bsc', 'base']:
+            # Ethereum-compatible address validation (42 characters, starts with 0x)
+            eth_pattern = r'^0x[a-fA-F0-9]{40}$'
+            if not re.match(eth_pattern, value):
+                raise serializers.ValidationError(
+                    f"Invalid {chain.title()} address format. Expected 42 characters starting with '0x' followed by 40 hexadecimal characters."
+                )
+
+            # Additional checksum validation for Ethereum addresses
+            try:
+                from web3 import Web3
+                if not Web3.is_checksum_address(value):
+                    # Try to convert to checksum address
+                    value = Web3.to_checksum_address(value.lower())
+            except:
+                # If Web3 validation fails, we still accept the basic format
+                pass
+
+        elif chain == 'solana':
+            # Solana address validation (base58 encoded, 32-44 characters)
+            solana_pattern = r'^[1-9A-HJ-NP-Za-km-z]{32,44}$'
+            if not re.match(solana_pattern, value):
+                raise serializers.ValidationError(
+                    "Invalid Solana address format. Expected 32-44 base58 characters (excluding 0, O, I, l)."
+                )
+        else:
+            # Basic length validation for unknown chains
+            if len(value) < 10:
+                raise serializers.ValidationError("Address seems too short to be valid")
+
         return value
 
 
