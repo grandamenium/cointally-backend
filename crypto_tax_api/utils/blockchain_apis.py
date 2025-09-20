@@ -12,6 +12,7 @@ from django.utils import timezone as django_timezone
 from web3 import Web3
 from decimal import Decimal, InvalidOperation, ConversionSyntax
 from crypto_tax_api.services.historical_price_service import fetch_historical_price
+from crypto_tax_api.services.dynamic_price_service import DynamicPriceResolver, TokenMetadataResolver
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,20 @@ DEX_ROUTERS = {
 }
 
 
+def fetch_token_metadata(contract_address: str, alchemy_url: str) -> dict:
+    """
+    Fetch token metadata using Alchemy's getTokenMetadata
+
+    Args:
+        contract_address: Token contract address
+        alchemy_url: Alchemy API URL
+
+    Returns:
+        Dict containing symbol, name, decimals, and logo
+    """
+    return TokenMetadataResolver.fetch_from_alchemy(contract_address, alchemy_url)
+
+
 def fetch_ethereum_transactions(address):
     """
     Fetch transactions for an Ethereum address using Alchemy API with proper authentication
@@ -256,9 +271,39 @@ def fetch_ethereum_transactions(address):
                 if asset is None:
                     asset = 'ETH'  # Default to ETH if no asset specified
 
+                # Extract contract address and metadata for ERC20 tokens
+                raw_contract = tx.get('rawContract', {})
+                contract_address = raw_contract.get('address')
+                token_decimals = 18  # Default decimals
+
+                if contract_address:
+                    # ERC20 token - fetch metadata
+                    try:
+                        token_metadata = fetch_token_metadata(contract_address, alchemy_url)
+                        asset_symbol = token_metadata['symbol']
+                        token_decimals = token_metadata['decimals']
+
+                        # If rawContract has decimal value, use it
+                        if 'decimal' in raw_contract:
+                            token_decimals = int(raw_contract['decimal'], 16) if raw_contract['decimal'] else 18
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch metadata for token {contract_address}: {e}")
+                        asset_symbol = asset
+                else:
+                    # Native ETH
+                    contract_address = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"  # Placeholder for ETH
+                    asset_symbol = 'ETH'
+
                 # Make sure we have a value field, default to 0 if missing
                 if 'value' not in tx:
                     tx['value'] = 0
+
+                # Calculate amount with proper decimals
+                if 'rawContract' in tx and 'value' in tx['rawContract']:
+                    raw_value = int(tx['rawContract'].get('value', '0x0'), 16)
+                    amount = Decimal(raw_value) / Decimal(10 ** token_decimals)
+                else:
+                    amount = safe_decimal(tx.get('value', 0))
 
                 # Get block number for timestamp
                 block_num = tx.get('blockNum')
@@ -297,22 +342,32 @@ def fetch_ethereum_transactions(address):
                 if asset == 'ETH' and to_address and w3.to_checksum_address(to_address) in DEX_ROUTERS:
                     tx_type = 'swap'  # ETH sent to DEX router is likely a swap
 
-                # Get asset details
-                asset_symbol = asset if asset != 'ETH' else 'ETH'
-
-                # Safely convert value to Decimal
-                amount = safe_decimal(tx['value'])
-
-                # Get historical price data for the transaction timestamp
-                # Convert timestamp to Unix timestamp for historical price API
+                # Use dynamic price resolver for accurate pricing
                 unix_timestamp = int(timestamp.timestamp()) if hasattr(timestamp, 'timestamp') else int(time.time())
-                price_usd = Decimal(str(fetch_historical_price(asset_symbol, unix_timestamp)))
+
+                if contract_address and contract_address != "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE":
+                    # Use dynamic resolver for tokens
+                    price_resolver = DynamicPriceResolver()
+                    price_data = price_resolver.resolve_token_price(
+                        contract_address,
+                        unix_timestamp,
+                        asset_symbol
+                    )
+                    price_usd = Decimal(str(price_data['price']))
+                    price_source = price_data['source']
+                    price_confidence = price_data['confidence']
+                else:
+                    # Use existing method for ETH
+                    price_usd = Decimal(str(fetch_historical_price('ETH', unix_timestamp)))
+                    price_source = 'coingecko'
+                    price_confidence = 'high'
+
                 value_usd = amount * price_usd
 
                 # Estimate gas fee
                 fee_usd = Decimal('0.00')
 
-                # Create transaction record
+                # Create transaction record with enhanced data
                 processed_transactions.append({
                     'transaction_hash': tx['hash'],
                     'timestamp': timestamp,
@@ -321,7 +376,11 @@ def fetch_ethereum_transactions(address):
                     'amount': amount,
                     'price_usd': price_usd,
                     'value_usd': value_usd,
-                    'fee_usd': fee_usd
+                    'fee_usd': fee_usd,
+                    'contract_address': contract_address,
+                    'token_decimals': token_decimals,
+                    'price_source': price_source,
+                    'price_confidence': price_confidence
                 })
 
         # Process incoming transactions (likely buys or transfers in)
@@ -336,9 +395,39 @@ def fetch_ethereum_transactions(address):
                 if asset is None:
                     asset = 'ETH'  # Default to ETH if no asset specified
 
+                # Extract contract address and metadata for ERC20 tokens
+                raw_contract = tx.get('rawContract', {})
+                contract_address = raw_contract.get('address')
+                token_decimals = 18  # Default decimals
+
+                if contract_address:
+                    # ERC20 token - fetch metadata
+                    try:
+                        token_metadata = fetch_token_metadata(contract_address, alchemy_url)
+                        asset_symbol = token_metadata['symbol']
+                        token_decimals = token_metadata['decimals']
+
+                        # If rawContract has decimal value, use it
+                        if 'decimal' in raw_contract:
+                            token_decimals = int(raw_contract['decimal'], 16) if raw_contract['decimal'] else 18
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch metadata for token {contract_address}: {e}")
+                        asset_symbol = asset
+                else:
+                    # Native ETH
+                    contract_address = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"  # Placeholder for ETH
+                    asset_symbol = 'ETH'
+
                 # Make sure we have a value field, default to 0 if missing
                 if 'value' not in tx:
                     tx['value'] = 0
+
+                # Calculate amount with proper decimals
+                if 'rawContract' in tx and 'value' in tx['rawContract']:
+                    raw_value = int(tx['rawContract'].get('value', '0x0'), 16)
+                    amount = Decimal(raw_value) / Decimal(10 ** token_decimals)
+                else:
+                    amount = safe_decimal(tx.get('value', 0))
 
                 # Skip transfers from self (already processed as outgoing)
                 if tx['from'].lower() == address:
@@ -381,19 +470,29 @@ def fetch_ethereum_transactions(address):
                 if from_address and w3.to_checksum_address(from_address) in DEX_ROUTERS:
                     tx_type = 'swap'  # Received from DEX router is likely a swap
 
-                # Get asset details
-                asset_symbol = asset if asset != 'ETH' else 'ETH'
-
-                # Safely convert value to Decimal
-                amount = safe_decimal(tx['value'])
-
-                # Get historical price data for the transaction timestamp
-                # Convert timestamp to Unix timestamp for historical price API
+                # Use dynamic price resolver for accurate pricing
                 unix_timestamp = int(timestamp.timestamp()) if hasattr(timestamp, 'timestamp') else int(time.time())
-                price_usd = Decimal(str(fetch_historical_price(asset_symbol, unix_timestamp)))
+
+                if contract_address and contract_address != "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE":
+                    # Use dynamic resolver for tokens
+                    price_resolver = DynamicPriceResolver()
+                    price_data = price_resolver.resolve_token_price(
+                        contract_address,
+                        unix_timestamp,
+                        asset_symbol
+                    )
+                    price_usd = Decimal(str(price_data['price']))
+                    price_source = price_data['source']
+                    price_confidence = price_data['confidence']
+                else:
+                    # Use existing method for ETH
+                    price_usd = Decimal(str(fetch_historical_price('ETH', unix_timestamp)))
+                    price_source = 'coingecko'
+                    price_confidence = 'high'
+
                 value_usd = amount * price_usd
 
-                # Create transaction record
+                # Create transaction record with enhanced data
                 processed_transactions.append({
                     'transaction_hash': tx['hash'],
                     'timestamp': timestamp,
@@ -402,7 +501,11 @@ def fetch_ethereum_transactions(address):
                     'amount': amount,
                     'price_usd': price_usd,
                     'value_usd': value_usd,
-                    'fee_usd': Decimal('0.00')  # Incoming transfers don't pay gas
+                    'fee_usd': Decimal('0.00'),  # Incoming transfers don't pay gas
+                    'contract_address': contract_address,
+                    'token_decimals': token_decimals,
+                    'price_source': price_source,
+                    'price_confidence': price_confidence
                 })
 
         # Sort by timestamp
@@ -572,10 +675,82 @@ def fetch_solana_transactions(address):
         return all_transactions if all_transactions else []
 
 
+def classify_solana_instruction(instruction, parsed_info):
+    """
+    Classify Solana instruction type for proper processing
+    Ensures clean separation between SOL and SPL token transfers
+    """
+    program = instruction.get('program', 'unknown')
+    parsed_type = parsed_info.get('type', 'unknown') if parsed_info else 'unknown'
+
+    logger.debug(f"Classifying instruction: program='{program}', type='{parsed_type}'")
+
+    if program == 'system' and parsed_type == 'transfer':
+        return 'sol_transfer'
+    elif program == 'spl-token' and parsed_type in ['transfer', 'transferChecked']:
+        return 'spl_transfer'
+    elif 'stake' in program.lower():
+        return 'staking'
+    elif 'vote' in program.lower():
+        return 'voting'
+    else:
+        return 'other'
+
+
+def process_sol_transfer(instruction, parsed_info, user_address, signature, timestamp, sol_price, fee_usd, processed_transfer):
+    """
+    Process native SOL transfer instructions
+    Ensures SOL transfers are properly classified and never enter SPL logic
+    """
+    info = parsed_info.get('info', {})
+    source = info.get('source')
+    destination = info.get('destination')
+    lamports = info.get('lamports', 0)
+
+    logger.debug(f"Processing SOL transfer: source={source}, destination={destination}, lamports={lamports}")
+
+    # Check if user is involved
+    if source == user_address or destination == user_address:
+        sol_amount = Decimal(lamports) / Decimal(10**9)  # Convert lamports to SOL
+
+        # Skip dust amounts
+        if sol_amount < Decimal('0.000001'):
+            logger.debug(f"Skipping dust SOL amount: {sol_amount}")
+            return None
+
+        # Determine transaction type
+        if source == user_address:
+            tx_type = 'sell' if destination != user_address else 'transfer'
+        else:
+            tx_type = 'buy'
+
+        value_usd = sol_amount * Decimal(sol_price)
+
+        logger.info(f"Created SOL transfer: {tx_type}, amount={sol_amount} SOL, value=${value_usd}")
+
+        return {
+            'transaction_hash': signature,
+            'timestamp': timestamp,
+            'transaction_type': tx_type,
+            'asset_symbol': 'SOL',
+            'amount': sol_amount,
+            'price_usd': Decimal(sol_price),
+            'value_usd': value_usd,
+            'fee_usd': fee_usd if not processed_transfer else Decimal('0'),  # Only add fee once per tx
+            'contract_address': None,  # Native SOL has no contract address
+            'token_decimals': 9,  # SOL has 9 decimals
+            'price_source': 'coingecko',
+            'price_confidence': 'high'
+        }
+
+    return None
+
+
 def parse_solana_tax_transaction(parsed_tx, user_address, signature, block_time):
     """
     Parse a Solana transaction for tax-relevant information using proper Alchemy parsed data
     Enhanced to handle staking, rewards, and all transaction types
+    Fixed to properly classify SOL vs SPL transfers
     """
     transactions = []
 
@@ -590,6 +765,8 @@ def parse_solana_tax_transaction(parsed_tx, user_address, signature, block_time)
         fee_usd = fee_sol * sol_price if fee_sol > 0 else Decimal('0')
 
         instructions = parsed_tx.get('transaction', {}).get('message', {}).get('instructions', [])
+
+        logger.debug(f"Processing transaction {signature} with {len(instructions)} instructions")
 
         # Get pre/post balances to detect SOL transfers
         account_keys = parsed_tx.get('transaction', {}).get('message', {}).get('accountKeys', [])
@@ -653,21 +830,40 @@ def parse_solana_tax_transaction(parsed_tx, user_address, signature, block_time)
                 })
                 processed_transfer = True
 
-        # Parse each instruction for additional transfers (SPL tokens)
+        # Process each instruction with proper classification
         for instruction in instructions:
             parsed_info = instruction.get('parsed')
-            program = instruction.get('program')
 
             if not parsed_info:
+                logger.debug(f"Skipping instruction without parsed info: {instruction.get('program', 'unknown')}")
                 continue
 
-            # Handle SPL Token transfers
-            if program == 'spl-token' and parsed_info.get('type') in ['transfer', 'transferChecked']:
+            # Classify the instruction type
+            instruction_type = classify_solana_instruction(instruction, parsed_info)
+            logger.debug(f"Classified instruction as: {instruction_type}")
+
+            # Process native SOL transfers first (prevent fallthrough to SPL logic)
+            if instruction_type == 'sol_transfer':
+                result = process_sol_transfer(instruction, parsed_info, user_address, signature, timestamp, sol_price, fee_usd, processed_transfer)
+                if result:
+                    transactions.append(result)
+                    processed_transfer = True
+
+            # Process SPL token transfers only for actual SPL tokens
+            elif instruction_type == 'spl_transfer':
                 info = parsed_info.get('info', {})
                 authority = info.get('authority')
                 source = info.get('source')
                 destination = info.get('destination')
                 amount = info.get('amount')
+
+                # CRITICAL: Validate this is a real SPL token and not a misclassified SOL transfer
+                mint_address = info.get('mint', 'UNKNOWN')
+                if mint_address == 'UNKNOWN':
+                    logger.warning(f"Skipping SPL transfer with UNKNOWN mint - likely misclassified SOL transfer: {signature}")
+                    continue
+
+                logger.debug(f"Processing SPL transfer: mint={mint_address}, authority={authority}, amount={amount}")
 
                 # Check if user is involved in this transfer
                 if authority == user_address or source == user_address or destination == user_address:
@@ -715,7 +911,34 @@ def parse_solana_tax_transaction(parsed_tx, user_address, signature, block_time)
                         # Add more token mints as needed
                     }
 
-                    token_symbol = token_map.get(mint_address, f'SPL-{mint_address[:6]}')
+                    # Use dynamic token discovery for SPL tokens (similar to Ethereum approach)
+                    token_symbol = 'UNKNOWN'
+                    token_decimals_from_metadata = 9  # Default SPL token decimals
+
+                    if mint_address in token_map:
+                        token_symbol = token_map[mint_address]
+                    elif mint_address and mint_address != 'UNKNOWN':
+                        # Use dynamic token discovery for unknown tokens
+                        try:
+                            api_key = get_alchemy_api_key('ALCHEMY_SOLANA_API_KEY')
+                            if api_key:
+                                alchemy_url = ALCHEMY_ENDPOINTS['solana'].format(api_key=api_key)
+                                metadata = TokenMetadataResolver.fetch_solana_token_metadata(mint_address, alchemy_url)
+                                if metadata['symbol'] != 'UNKNOWN':
+                                    token_symbol = metadata['symbol']
+                                    token_decimals_from_metadata = metadata['decimals']
+                                    logger.info(f"Dynamic discovery: Found SPL token {token_symbol} (decimals: {token_decimals_from_metadata}) for mint {mint_address}")
+                                else:
+                                    token_symbol = f'SPL-{mint_address[:6]}'
+                                    logger.warning(f"Could not resolve SPL token metadata for mint {mint_address}, using fallback: {token_symbol}")
+                            else:
+                                token_symbol = f'SPL-{mint_address[:6]}'
+                                logger.warning(f"No Alchemy API key for dynamic SPL token discovery, using fallback: {token_symbol}")
+                        except Exception as e:
+                            token_symbol = f'SPL-{mint_address[:6]}'
+                            logger.error(f"Error in dynamic SPL token discovery for {mint_address}: {str(e)}")
+                    else:
+                        token_symbol = 'SPL-UNKNOWN'
 
                     # Get historical price for the token
                     if token_symbol in ['USDC', 'USDT']:
@@ -732,7 +955,20 @@ def parse_solana_tax_transaction(parsed_tx, user_address, signature, block_time)
                             logger.warning(f"Failed to fetch historical price for {token_symbol}: {str(e)}")
                             price_usd = Decimal('0.01')  # Fallback for price fetch failure
                     else:
-                        price_usd = Decimal('0.01')  # Unknown SPL tokens
+                        # For unknown SPL tokens, try dynamic price resolution
+                        if mint_address and mint_address != 'UNKNOWN' and not token_symbol.startswith('SPL-UNKNOWN'):
+                            try:
+                                # Use the DynamicPriceResolver for Solana tokens
+                                price_resolver = DynamicPriceResolver()
+                                unix_timestamp = int(timestamp.timestamp()) if hasattr(timestamp, 'timestamp') else int(time.time())
+                                price_data = price_resolver.resolve_token_price(mint_address, unix_timestamp, token_symbol)
+                                price_usd = Decimal(str(price_data['price']))
+                                logger.info(f"Dynamic price resolution for {token_symbol}: ${price_usd} from {price_data['source']}")
+                            except Exception as e:
+                                logger.warning(f"Dynamic price resolution failed for {token_symbol}: {str(e)}")
+                                price_usd = Decimal('0.01')  # Fallback
+                        else:
+                            price_usd = Decimal('0.01')  # Unknown SPL tokens without mint address
 
                     value_usd = token_amount * price_usd
 
@@ -744,44 +980,18 @@ def parse_solana_tax_transaction(parsed_tx, user_address, signature, block_time)
                         'amount': token_amount,
                         'price_usd': price_usd,
                         'value_usd': value_usd,
-                        'fee_usd': fee_usd if not processed_transfer else Decimal('0')  # Only add fee once per tx
+                        'fee_usd': fee_usd if not processed_transfer else Decimal('0'),  # Only add fee once per tx
+                        'contract_address': mint_address if mint_address and mint_address != 'UNKNOWN' else None,
+                        'token_decimals': token_decimals_from_metadata,
+                        'price_source': 'dynamic' if not token_symbol.startswith('SPL-') else 'fallback',
+                        'price_confidence': 'medium' if not token_symbol.startswith('SPL-') else 'none'
                     })
                     processed_transfer = True
 
-            # Handle native SOL transfers (only if not already processed via balance change)
-            elif program == 'system' and parsed_info.get('type') == 'transfer' and not processed_transfer:
-                info = parsed_info.get('info', {})
-                source = info.get('source')
-                destination = info.get('destination')
-                lamports = info.get('lamports', 0)
-
-                # Check if user is involved
-                if source == user_address or destination == user_address:
-                    sol_amount = Decimal(lamports) / Decimal(10**9)  # Convert lamports to SOL
-
-                    # Skip dust amounts
-                    if sol_amount < Decimal('0.000001'):
-                        continue
-
-                    # Determine transaction type
-                    if source == user_address:
-                        tx_type = 'sell' if destination != user_address else 'transfer'
-                    else:
-                        tx_type = 'buy'
-
-                    value_usd = sol_amount * Decimal(sol_price)
-
-                    transactions.append({
-                        'transaction_hash': signature,
-                        'timestamp': timestamp,
-                        'transaction_type': tx_type,
-                        'asset_symbol': 'SOL',
-                        'amount': sol_amount,
-                        'price_usd': Decimal(sol_price),
-                        'value_usd': value_usd,
-                        'fee_usd': fee_usd if not processed_transfer else Decimal('0')  # Only add fee once per tx
-                    })
-                    processed_transfer = True
+            # Additional instruction types can be handled here (staking, voting, etc.)
+            elif instruction_type in ['staking', 'voting']:
+                logger.debug(f"Found {instruction_type} instruction - future enhancement")
+                # Future: Add staking/voting logic here
 
         # If no specific transfers found but user paid significant fees, record as a transaction fee
         if not transactions and fee_usd > Decimal('0.01'):  # Only record if fee is more than 1 cent
@@ -793,7 +1003,11 @@ def parse_solana_tax_transaction(parsed_tx, user_address, signature, block_time)
                 'amount': fee_sol,
                 'price_usd': Decimal(sol_price),
                 'value_usd': fee_usd,
-                'fee_usd': fee_usd
+                'fee_usd': fee_usd,
+                'contract_address': None,  # Native SOL has no contract address
+                'token_decimals': 9,  # SOL has 9 decimals
+                'price_source': 'coingecko',
+                'price_confidence': 'high'
             })
 
     except Exception as e:

@@ -351,7 +351,11 @@ class WalletViewSet(viewsets.ModelViewSet):
                 'amount': tx_data.get('amount'),
                 'price_usd': tx_data.get('price_usd'),
                 'value_usd': tx_data.get('value_usd'),
-                'fee_usd': tx_data.get('fee_usd', 0)
+                'fee_usd': tx_data.get('fee_usd', 0),
+                'contract_address': tx_data.get('contract_address'),
+                'token_decimals': tx_data.get('token_decimals', 18),
+                'price_source': tx_data.get('price_source', 'coingecko'),
+                'price_confidence': tx_data.get('price_confidence', 'high')
             }
 
             # Calculate cost basis and realized profit/loss if it's a sell

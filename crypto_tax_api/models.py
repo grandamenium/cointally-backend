@@ -48,6 +48,21 @@ class Transaction(models.Model):
     notes = models.TextField(null=True, blank=True)  # For storing error messages or other notes
     needs_review = models.BooleanField(default=False)  # Flag for transactions that need manual review
 
+    # New fields for enhanced token tracking
+    contract_address = models.CharField(max_length=42, null=True, blank=True)
+    token_decimals = models.IntegerField(default=18)
+    price_source = models.CharField(max_length=50, default='coingecko')
+    price_confidence = models.CharField(
+        max_length=20,
+        choices=[
+            ('high', 'High - CEX/CoinGecko'),
+            ('medium', 'Medium - DEX/GeckoTerminal'),
+            ('low', 'Low - DexScreener/Recent'),
+            ('none', 'None - Fallback')
+        ],
+        default='high'
+    )
+
     class Meta:
         unique_together = ('wallet', 'transaction_hash')
         indexes = [
@@ -93,6 +108,26 @@ class TaxSummary(models.Model):
 
     def __str__(self):
         return f"Tax summary for {self.wallet} from {self.start_date} to {self.end_date}"
+
+
+class TokenMetadata(models.Model):
+    """Cache for token metadata"""
+    contract_address = models.CharField(max_length=42, unique=True, db_index=True)
+    symbol = models.CharField(max_length=20)
+    name = models.CharField(max_length=100)
+    decimals = models.IntegerField(default=18)
+    logo_url = models.URLField(null=True, blank=True)
+    coingecko_id = models.CharField(max_length=100, null=True, blank=True)
+    last_updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['contract_address']),
+            models.Index(fields=['symbol']),
+        ]
+
+    def __str__(self):
+        return f"{self.symbol} ({self.contract_address[:10]}...)"
 
 
 class PremiumUser(models.Model):
