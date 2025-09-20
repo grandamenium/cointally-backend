@@ -791,6 +791,9 @@ def get_alchemy_api_key(network_specific_var=None):
     # Special case for Arbitrum - use the user's provided API key
     if network_specific_var == 'ALCHEMY_ARBITRUM_API_KEY':
         api_key = 'dN6yJ1dHDtCc9LIRC2lDf'  # User's provided Arbitrum API key
+    # Special case for Hyperliquid - use the user's provided API key
+    elif network_specific_var == 'ALCHEMY_HYPERLIQUID_API_KEY':
+        api_key = 'dN6yJ1dHDtCc9LIRC2lDf'  # User's provided Hyperliquid API key
     elif not api_key:
         # Last resort hardcoded fallback for other chains
         api_key = 'PHwvYViFcbMNwC8Tb_FI06AnU9LId5S9'
@@ -809,6 +812,7 @@ ALCHEMY_ENDPOINTS = {
     'arbitrum': 'https://arb-mainnet.g.alchemy.com/v2/{api_key}',
     'optimism': 'https://opt-mainnet.g.alchemy.com/v2/{api_key}',
     'base': 'https://base-mainnet.g.alchemy.com/v2/{api_key}',
+    'hyperliquid': 'https://hyperliquid-mainnet.g.alchemy.com/v2/{api_key}',
 }
 
 
@@ -1097,6 +1101,123 @@ def fetch_arbitrum_transactions(address):
         ]
 
         return buy_txs + sell_txs
+
+
+def fetch_hyperliquid_transactions(address):
+    """
+    Fetch transactions for a Hyperliquid address using native Hyperliquid REST API
+    """
+    # Hyperliquid uses its own native API, not Alchemy
+    # No API key required for public data
+    hyperliquid_api_url = "https://api.hyperliquid.xyz/info"
+    logger.info(f"Starting Hyperliquid transaction fetch for address: {address}")
+
+    try:
+        processed_transactions = []
+
+        # 1. Get user fills (transaction history)
+        fills_payload = {
+            "type": "user_fills",
+            "user": address,
+            "aggregateByTime": False
+        }
+
+        response = requests.post(hyperliquid_api_url, json=fills_payload, timeout=10)
+
+        if response.status_code != 200:
+            logger.error(f"Hyperliquid API error: {response.text}")
+            # Check if it's a wallet not found error
+            if response.status_code == 400:
+                logger.info(f"Wallet {address} may not have any Hyperliquid activity")
+            return []
+
+        fills_data = response.json()
+
+        # Check if we got an error response
+        if isinstance(fills_data, dict) and 'error' in fills_data:
+            logger.error(f"Hyperliquid API error: {fills_data['error']}")
+            return []
+
+        # Process fills (transactions)
+        if isinstance(fills_data, list):
+            for fill in fills_data:
+                try:
+                    # Convert timestamp from milliseconds to datetime
+                    timestamp = datetime.fromtimestamp(fill['time'] / 1000, tz=timezone.utc)
+
+                    # Determine transaction type based on side
+                    # 'A' = Ask (sell), 'B' = Bid (buy)
+                    tx_type = 'sell' if fill['side'] == 'A' else 'buy'
+
+                    # Parse amounts
+                    amount = safe_decimal(fill['sz'])
+                    price_usd = safe_decimal(fill['px'])
+                    value_usd = amount * price_usd
+                    fee_usd = safe_decimal(fill.get('fee', '0'))
+
+                    # Create transaction record
+                    processed_transactions.append({
+                        'transaction_hash': fill['hash'],
+                        'timestamp': timestamp,
+                        'transaction_type': tx_type,
+                        'asset_symbol': fill['coin'],
+                        'amount': amount,
+                        'price_usd': price_usd,
+                        'value_usd': value_usd,
+                        'fee_usd': fee_usd
+                    })
+                except Exception as e:
+                    logger.error(f"Error processing fill {fill.get('hash', 'unknown')}: {str(e)}")
+                    continue
+
+        # 2. Get spot balances for additional context
+        spot_payload = {
+            "type": "spot_clearinghouse_state",
+            "user": address
+        }
+
+        try:
+            spot_response = requests.post(hyperliquid_api_url, json=spot_payload, timeout=10)
+            if spot_response.status_code == 200:
+                spot_data = spot_response.json()
+                if 'balances' in spot_data:
+                    logger.info(f"Found {len(spot_data['balances'])} spot balances for {address}")
+        except Exception as e:
+            logger.warning(f"Could not fetch spot balances: {str(e)}")
+
+        # 3. Get clearinghouse state for perpetuals
+        clearinghouse_payload = {
+            "type": "clearinghouse_state",
+            "user": address
+        }
+
+        try:
+            clearinghouse_response = requests.post(hyperliquid_api_url, json=clearinghouse_payload, timeout=10)
+            if clearinghouse_response.status_code == 200:
+                clearinghouse_data = clearinghouse_response.json()
+                if 'marginSummary' in clearinghouse_data:
+                    account_value = clearinghouse_data['marginSummary'].get('accountValue', '0')
+                    logger.info(f"Account value for {address}: ${account_value}")
+        except Exception as e:
+            logger.warning(f"Could not fetch clearinghouse state: {str(e)}")
+
+        # Sort by timestamp
+        processed_transactions.sort(key=lambda x: x['timestamp'])
+
+        # Log transaction count for debugging
+        logger.info(f"Retrieved {len(processed_transactions)} transactions for {address} on Hyperliquid")
+
+        return processed_transactions
+
+    except Exception as e:
+        logger.error(f"Error fetching Hyperliquid transactions: {str(e)}", exc_info=True)
+
+        # Check if it's a network error
+        if 'Connection' in str(e) or 'Timeout' in str(e):
+            logger.error("Network error connecting to Hyperliquid API")
+
+        # Return empty list instead of mock data for production use
+        return []
 
 
 def fetch_bsc_transactions(address):
@@ -1746,6 +1867,8 @@ def fetch_multiple_chain_transactions(wallet):
             transactions = fetch_solana_transactions(wallet.address)
         elif wallet.chain == 'arbitrum':
             transactions = fetch_arbitrum_transactions(wallet.address)
+        elif wallet.chain == 'hyperliquid':
+            transactions = fetch_hyperliquid_transactions(wallet.address)
         elif wallet.chain == 'bsc':
             transactions = fetch_bsc_transactions(wallet.address)
         else:

@@ -86,7 +86,7 @@ class WalletViewSet(viewsets.ModelViewSet):
             )
 
         # Normalize address format
-        if chain == 'ethereum' or chain == 'polygon' or chain == 'arbitrum' or chain == 'bsc':
+        if chain == 'ethereum' or chain == 'polygon' or chain == 'arbitrum' or chain == 'hyperliquid' or chain == 'bsc':
             address = address.lower()
             logger.info(f"WALLET_ADDRESS_NORMALIZED: {address[:10]}...{address[-6:]} for chain {chain}")
 
