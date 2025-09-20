@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from django.utils import timezone as django_timezone
 from web3 import Web3
 from decimal import Decimal, InvalidOperation, ConversionSyntax
+from crypto_tax_api.services.historical_price_service import fetch_historical_price
 
 logger = logging.getLogger(__name__)
 
@@ -302,8 +303,10 @@ def fetch_ethereum_transactions(address):
                 # Safely convert value to Decimal
                 amount = safe_decimal(tx['value'])
 
-                # Get price data
-                price_usd = fetch_price_data(asset_symbol)
+                # Get historical price data for the transaction timestamp
+                # Convert timestamp to Unix timestamp for historical price API
+                unix_timestamp = int(timestamp.timestamp()) if hasattr(timestamp, 'timestamp') else int(time.time())
+                price_usd = Decimal(str(fetch_historical_price(asset_symbol, unix_timestamp)))
                 value_usd = amount * price_usd
 
                 # Estimate gas fee
@@ -384,8 +387,10 @@ def fetch_ethereum_transactions(address):
                 # Safely convert value to Decimal
                 amount = safe_decimal(tx['value'])
 
-                # Get price data
-                price_usd = fetch_price_data(asset_symbol)
+                # Get historical price data for the transaction timestamp
+                # Convert timestamp to Unix timestamp for historical price API
+                unix_timestamp = int(timestamp.timestamp()) if hasattr(timestamp, 'timestamp') else int(time.time())
+                price_usd = Decimal(str(fetch_historical_price(asset_symbol, unix_timestamp)))
                 value_usd = amount * price_usd
 
                 # Create transaction record
@@ -579,10 +584,10 @@ def parse_solana_tax_transaction(parsed_tx, user_address, signature, block_time)
         fee_lamports = parsed_tx.get('meta', {}).get('fee', 0)
         fee_sol = Decimal(fee_lamports) / Decimal(10**9)  # Convert lamports to SOL
 
-        # Get SOL price for fee calculation
-        # TODO: Replace with historical price fetching
-        sol_price = fetch_price_data('SOL')
-        fee_usd = fee_sol * Decimal(sol_price) if fee_sol > 0 else Decimal('0')
+        # Get historical SOL price for fee calculation
+        unix_timestamp = int(timestamp.timestamp()) if hasattr(timestamp, 'timestamp') else int(time.time())
+        sol_price = Decimal(str(fetch_historical_price('SOL', unix_timestamp)))
+        fee_usd = fee_sol * sol_price if fee_sol > 0 else Decimal('0')
 
         instructions = parsed_tx.get('transaction', {}).get('message', {}).get('instructions', [])
 
@@ -956,8 +961,10 @@ def fetch_arbitrum_transactions(address):
                 # Safely convert value to Decimal
                 amount = safe_decimal(tx['value'])
 
-                # Get price data
-                price_usd = fetch_price_data(asset_symbol)
+                # Get historical price data for the transaction timestamp
+                # Convert timestamp to Unix timestamp for historical price API
+                unix_timestamp = int(timestamp.timestamp()) if hasattr(timestamp, 'timestamp') else int(time.time())
+                price_usd = Decimal(str(fetch_historical_price(asset_symbol, unix_timestamp)))
                 value_usd = amount * price_usd
 
                 # Estimate gas fee
@@ -1038,8 +1045,10 @@ def fetch_arbitrum_transactions(address):
                 # Safely convert value to Decimal
                 amount = safe_decimal(tx['value'])
 
-                # Get price data
-                price_usd = fetch_price_data(asset_symbol)
+                # Get historical price data for the transaction timestamp
+                # Convert timestamp to Unix timestamp for historical price API
+                unix_timestamp = int(timestamp.timestamp()) if hasattr(timestamp, 'timestamp') else int(time.time())
+                price_usd = Decimal(str(fetch_historical_price(asset_symbol, unix_timestamp)))
                 value_usd = amount * price_usd
 
                 # Create transaction record
@@ -1678,8 +1687,10 @@ def fetch_polygon_transactions(address):
                 # Safely convert value to Decimal
                 amount = safe_decimal(tx['value'])
 
-                # Get price data
-                price_usd = fetch_price_data(asset_symbol)
+                # Get historical price data for the transaction timestamp
+                # Convert timestamp to Unix timestamp for historical price API
+                unix_timestamp = int(timestamp.timestamp()) if hasattr(timestamp, 'timestamp') else int(time.time())
+                price_usd = Decimal(str(fetch_historical_price(asset_symbol, unix_timestamp)))
                 value_usd = amount * price_usd
 
                 # Estimate gas fee
@@ -1761,8 +1772,10 @@ def fetch_polygon_transactions(address):
                 # Safely convert value to Decimal
                 amount = safe_decimal(tx['value'])
 
-                # Get price data
-                price_usd = fetch_price_data(asset_symbol)
+                # Get historical price data for the transaction timestamp
+                # Convert timestamp to Unix timestamp for historical price API
+                unix_timestamp = int(timestamp.timestamp()) if hasattr(timestamp, 'timestamp') else int(time.time())
+                price_usd = Decimal(str(fetch_historical_price(asset_symbol, unix_timestamp)))
                 value_usd = amount * price_usd
 
                 # Create transaction record

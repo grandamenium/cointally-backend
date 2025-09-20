@@ -1,6 +1,6 @@
 import logging
 import datetime
-from datetime import datetime
+from datetime import datetime as dt_datetime, timedelta
 import logging
 import mimetypes
 import traceback
@@ -443,7 +443,7 @@ class WalletViewSet(viewsets.ModelViewSet):
         monthly_pnl = []
 
         while current_date <= end_date:
-            next_month = current_date.replace(day=28) + timezone.timedelta(days=4)
+            next_month = current_date.replace(day=28) + timedelta(days=4)
             next_month = next_month.replace(day=1)
 
             # Get transactions for this month
@@ -545,9 +545,9 @@ class PremiumFeatureViewSet(viewsets.ViewSet):
         try:
             start_date = datetime.date(year, month, 1)
             if month == 12:
-                end_date = datetime.date(year + 1, 1, 1) - datetime.timedelta(days=1)
+                end_date = datetime.date(year + 1, 1, 1) - timedelta(days=1)
             else:
-                end_date = datetime.date(year, month + 1, 1) - datetime.timedelta(days=1)
+                end_date = datetime.date(year, month + 1, 1) - timedelta(days=1)
         except ValueError:
             return Response(
                 {"error": "Invalid year or month."},
@@ -753,7 +753,7 @@ class PremiumFeatureViewSet(viewsets.ViewSet):
         end_month = end_date.replace(day=1)
 
         while current_date <= end_month:
-            next_month = (current_date.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+            next_month = (current_date.replace(day=28) + timedelta(days=4)).replace(day=1)
 
             month_fees = transactions.filter(
                 timestamp__gte=datetime.datetime.combine(current_date, datetime.time.min),
@@ -882,7 +882,7 @@ class SubscriptionCreateView(APIView):
         # For now, we'll simulate a successful subscription
         user = request.user
         user.is_premium = True
-        user.premium_until = timezone.now() + datetime.timedelta(days=365)  # 1 year subscription
+        user.premium_until = timezone.now() + timedelta(days=365)  # 1 year subscription
         user.save()
 
         return Response({
@@ -2539,13 +2539,13 @@ class PortfolioAnalyticsView(views.APIView):
             # Calculate date range
             end_date = timezone.now()
             if timeframe == '1M':
-                start_date = end_date - datetime.timedelta(days=30)
+                start_date = end_date - timedelta(days=30)
             elif timeframe == '3M':
-                start_date = end_date - datetime.timedelta(days=90)
+                start_date = end_date - timedelta(days=90)
             elif timeframe == '6M':
-                start_date = end_date - datetime.timedelta(days=180)
+                start_date = end_date - timedelta(days=180)
             elif timeframe == '1Y':
-                start_date = end_date - datetime.timedelta(days=365)
+                start_date = end_date - timedelta(days=365)
             else:
                 start_date = datetime(2020, 1, 1, tzinfo=timezone.utc)
 
@@ -2925,13 +2925,13 @@ class TransactionInsightsView(views.APIView):
         # Apply timeframe filter
         end_date = timezone.now()
         if timeframe == '1M':
-            start_date = end_date - datetime.timedelta(days=30)
+            start_date = end_date - timedelta(days=30)
         elif timeframe == '3M':
-            start_date = end_date - datetime.timedelta(days=90)
+            start_date = end_date - timedelta(days=90)
         elif timeframe == '6M':
-            start_date = end_date - datetime.timedelta(days=180)
+            start_date = end_date - timedelta(days=180)
         elif timeframe == '1Y':
-            start_date = end_date - datetime.timedelta(days=365)
+            start_date = end_date - timedelta(days=365)
         else:
             start_date = datetime(2020, 1, 1, tzinfo=timezone.utc)
 
