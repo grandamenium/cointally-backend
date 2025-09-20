@@ -43,4 +43,11 @@ urlpatterns = [
     path('coinbase/oauth/revoke/', views.coinbase_oauth_revoke, name='coinbase_oauth_revoke'),
     path('coinbase/oauth/status/', views.coinbase_oauth_status, name='coinbase_oauth_status'),
 
+    # Coinbase CDP (Advanced Trade) endpoints
+    path('coinbase/cdp/key/', views.coinbase_cdp_key_upload, name='coinbase_cdp_key_upload'),
+    path('coinbase/cdp/key/delete/', views.coinbase_cdp_key_delete, name='coinbase_cdp_key_delete'),
+    path('coinbase/cdp/accounts/', views.coinbase_cdp_accounts, name='coinbase_cdp_accounts'),
+    path('coinbase/cdp/fills/', views.coinbase_cdp_fills, name='coinbase_cdp_fills'),
+    path('coinbase/cdp/sync/', views.coinbase_cdp_sync_transactions, name='coinbase_cdp_sync_transactions'),
+
 ]

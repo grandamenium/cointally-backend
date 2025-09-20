@@ -1,5 +1,6 @@
 import logging
 import datetime
+from datetime import datetime
 import logging
 import mimetypes
 import traceback
@@ -51,6 +52,10 @@ from .utils.tax_calculator import (
     calculate_cost_basis_fifo, generate_form_8949
 )
 from crypto_tax_api.services.coinbase_oauth_service import CoinbaseOAuthService
+from crypto_tax_api.services.coinbase_cdp_auth import (
+    CoinbaseAdvancedClient, CdpKeyEncryption, parse_cdp_key,
+    extract_key_meta, process_fill_for_tax, sanitize_log_data
+)
 
 logger = logging.getLogger(__name__)
 
@@ -919,6 +924,76 @@ class ExchangeCredentialViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+    @action(detail=False, methods=['post'])
+    def upload_cdp_key(self, request):
+        """
+        Upload a CDP JSON key file for Coinbase Advanced Trade
+        """
+        import json
+        import re
+
+        try:
+            # Get the CDP JSON data from request
+            cdp_json = request.data.get('cdp_json')
+            if not cdp_json:
+                return Response({
+                    'success': False,
+                    'message': 'CDP JSON key is required'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Parse the CDP JSON
+            try:
+                cdp_data = json.loads(cdp_json)
+            except json.JSONDecodeError:
+                return Response({
+                    'success': False,
+                    'message': 'Invalid JSON format'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Extract key components
+            if 'name' not in cdp_data or 'privateKey' not in cdp_data:
+                return Response({
+                    'success': False,
+                    'message': 'Invalid CDP key format: missing name or privateKey'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Parse the key name to extract org_id and key_id
+            match = re.match(r'organizations/([^/]+)/apiKeys/([^/]+)', cdp_data['name'])
+            if not match:
+                return Response({
+                    'success': False,
+                    'message': 'Invalid key name format'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            org_id, key_id = match.groups()
+
+            # Create or update the credential
+            credential, created = ExchangeCredential.objects.update_or_create(
+                user=request.user,
+                exchange='coinbase_advanced',
+                defaults={
+                    'api_key': key_id,  # Store key_id in api_key field
+                    'api_passphrase': org_id,  # Store org_id in api_passphrase field
+                    'api_secret': cdp_json,  # Store the entire JSON in api_secret field
+                    'auth_type': 'cdp',
+                    'is_active': True,
+                    'is_connected': True
+                }
+            )
+
+            return Response({
+                'success': True,
+                'message': 'CDP key uploaded successfully',
+                'created': created,
+                'credential_id': credential.id
+            })
+
+        except Exception as e:
+            return Response({
+                'success': False,
+                'message': f'Error uploading CDP key: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['post'])
     def test_connection(self, request, pk=None):
@@ -2580,7 +2655,11 @@ class PortfolioAnalyticsView(views.APIView):
             holdings[asset] = max(0, holdings[asset])
         
         return {asset: amount for asset, amount in holdings.items() if amount > 0.00000001}
-    
+
+    def _calculate_current_holdings_from_transactions(self, user):
+        """Alias for _calculate_current_holdings_optimized for backward compatibility"""
+        return self._calculate_current_holdings_optimized(user)
+
     def _fetch_prices_parallel(self, asset_list):
         """OPTIMIZED: Fetch all prices in parallel with caching"""
         from crypto_tax_api.utils.blockchain_apis import fetch_price_data
@@ -2868,7 +2947,7 @@ class TransactionInsightsView(views.APIView):
         efficiency = self._calculate_efficiency_metrics(transactions)
 
         # Calculate current portfolio value
-        current_holdings = self._calculate_current_holdings_from_transactions(user)
+        current_holdings = self._calculate_current_holdings_optimized(user)
         current_portfolio_value = self._calculate_current_portfolio_value(current_holdings)
         
         # Asset allocation
@@ -3244,5 +3323,381 @@ def coinbase_oauth_status(request):
         logger.error(f"Error checking Coinbase OAuth status: {str(e)}")
         return Response(
             {'error': f'Failed to check OAuth status: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+# Coinbase CDP Authentication Endpoints
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def coinbase_cdp_key_upload(request):
+    """
+    Upload and store CDP API key for Coinbase Advanced Trade
+    """
+    try:
+        key_json = request.data.get('key_json')
+
+        if not key_json:
+            return Response(
+                {'error': 'Missing key_json in request'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Parse and validate CDP key
+        try:
+            key_data = parse_cdp_key(key_json)
+            key_meta = extract_key_meta(key_data)
+        except ValueError as e:
+            return Response(
+                {'error': f'Invalid CDP key format: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Encrypt the private key
+        encryption = CdpKeyEncryption()
+        encrypted_key = encryption.encrypt(key_data.private_key)
+
+        # Store or update the CDP credential
+        credential, created = ExchangeCredential.objects.update_or_create(
+            user=request.user,
+            exchange='coinbase_advanced',
+            defaults={
+                'api_key': key_meta.key_id,  # Store key ID as api_key
+                'api_secret': encrypted_key,  # Store encrypted private key
+                'api_passphrase': key_meta.org_id,  # Store org ID as passphrase
+                'is_connected': True,
+                'auth_type': 'cdp'
+            }
+        )
+
+        # Log the action (with sanitized data)
+        logger.info(f"CDP key {'updated' if not created else 'added'} for user {request.user.id}")
+
+        return Response({
+            'success': True,
+            'key_id': key_meta.key_id,
+            'org_id': key_meta.org_id,
+            'message': 'CDP key successfully uploaded and encrypted'
+        })
+
+    except Exception as e:
+        logger.error(f"Error uploading CDP key: {str(e)}")
+        return Response(
+            {'error': f'Failed to upload CDP key: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def coinbase_cdp_accounts(request):
+    """
+    Get Coinbase accounts using CDP authentication
+    """
+    import asyncio
+
+    try:
+        # Get CDP credentials
+        credential = ExchangeCredential.objects.filter(
+            user=request.user,
+            exchange='coinbase_advanced',
+            auth_type='cdp'
+        ).first()
+
+        if not credential:
+            return Response(
+                {'error': 'No CDP credentials found. Please upload your CDP key first.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Create key loader function
+        async def load_key():
+            from .services.coinbase_cdp_auth import CdpKeyData
+            encryption = CdpKeyEncryption()
+            decrypted_key = encryption.decrypt(credential.api_secret)
+
+            # Reconstruct the key name from stored metadata
+            key_name = f"organizations/{credential.api_passphrase}/apiKeys/{credential.api_key}"
+
+            return CdpKeyData(
+                name=key_name,
+                private_key=decrypted_key
+            )
+
+        # Create client and fetch accounts
+        async def fetch_accounts():
+            client = CoinbaseAdvancedClient(load_key)
+            try:
+                accounts_data = await client.get_accounts()
+                return accounts_data
+            finally:
+                await client.close()
+
+        # Run async function
+        accounts_data = asyncio.run(fetch_accounts())
+
+        return Response({
+            'success': True,
+            'accounts': accounts_data.get('accounts', []),
+            'has_next': accounts_data.get('has_next', False),
+            'cursor': accounts_data.get('cursor')
+        })
+
+    except Exception as e:
+        logger.error(f"Error fetching CDP accounts: {str(e)}")
+        return Response(
+            {'error': f'Failed to fetch accounts: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def coinbase_cdp_fills(request):
+    """
+    Get trading fills (executions) using CDP authentication
+    """
+    import asyncio
+
+    try:
+        # Get CDP credentials
+        credential = ExchangeCredential.objects.filter(
+            user=request.user,
+            exchange='coinbase_advanced',
+            auth_type='cdp'
+        ).first()
+
+        if not credential:
+            return Response(
+                {'error': 'No CDP credentials found. Please upload your CDP key first.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Get query parameters
+        product_id = request.GET.get('product_id')
+        start_date = request.GET.get('start_date')
+        end_date = request.GET.get('end_date')
+        limit = int(request.GET.get('limit', 100))
+        cursor = request.GET.get('cursor')
+
+        # Create key loader function
+        async def load_key():
+            from .services.coinbase_cdp_auth import CdpKeyData
+            encryption = CdpKeyEncryption()
+            decrypted_key = encryption.decrypt(credential.api_secret)
+
+            key_name = f"organizations/{credential.api_passphrase}/apiKeys/{credential.api_key}"
+
+            return CdpKeyData(
+                name=key_name,
+                private_key=decrypted_key
+            )
+
+        # Create client and fetch fills
+        async def fetch_fills():
+            client = CoinbaseAdvancedClient(load_key)
+            try:
+                fills_data = await client.list_fills(
+                    product_id=product_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                    limit=limit,
+                    cursor=cursor
+                )
+                return fills_data
+            finally:
+                await client.close()
+
+        # Run async function
+        fills_data = asyncio.run(fetch_fills())
+
+        # Process fills for tax calculations if requested
+        process_for_tax = request.GET.get('process_for_tax', 'false').lower() == 'true'
+        fills = fills_data.get('fills', [])
+
+        if process_for_tax:
+            processed_fills = []
+            for fill in fills:
+                try:
+                    processed = process_fill_for_tax(fill)
+                    processed_fills.append(processed)
+                except Exception as e:
+                    logger.warning(f"Error processing fill {fill.get('entry_id')}: {e}")
+
+            return Response({
+                'success': True,
+                'fills': fills,
+                'processed_fills': processed_fills,
+                'cursor': fills_data.get('cursor')
+            })
+
+        return Response({
+            'success': True,
+            'fills': fills,
+            'cursor': fills_data.get('cursor')
+        })
+
+    except Exception as e:
+        logger.error(f"Error fetching CDP fills: {str(e)}")
+        return Response(
+            {'error': f'Failed to fetch fills: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def coinbase_cdp_sync_transactions(request):
+    """
+    Sync all transactions using CDP authentication
+    """
+    import asyncio
+    from datetime import datetime, timedelta
+
+    try:
+        # Get CDP credentials
+        credential = ExchangeCredential.objects.filter(
+            user=request.user,
+            exchange='coinbase_advanced',
+            auth_type='cdp'
+        ).first()
+
+        if not credential:
+            return Response(
+                {'error': 'No CDP credentials found. Please upload your CDP key first.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Get sync parameters
+        start_date = request.data.get('start_date')
+        end_date = request.data.get('end_date')
+
+        # Default to last 365 days if not specified
+        if not start_date:
+            start_date = (datetime.now() - timedelta(days=365)).isoformat()
+        if not end_date:
+            end_date = datetime.now().isoformat()
+
+        # Create key loader function
+        async def load_key():
+            from .services.coinbase_cdp_auth import CdpKeyData
+            encryption = CdpKeyEncryption()
+            decrypted_key = encryption.decrypt(credential.api_secret)
+
+            key_name = f"organizations/{credential.api_passphrase}/apiKeys/{credential.api_key}"
+
+            return CdpKeyData(
+                name=key_name,
+                private_key=decrypted_key
+            )
+
+        # Sync transactions
+        async def sync_all_transactions():
+            client = CoinbaseAdvancedClient(load_key)
+            all_fills = []
+            cursor = None
+
+            try:
+                # Paginate through all fills
+                while True:
+                    fills_data = await client.list_fills(
+                        start_date=start_date,
+                        end_date=end_date,
+                        limit=100,
+                        cursor=cursor
+                    )
+
+                    fills = fills_data.get('fills', [])
+                    all_fills.extend(fills)
+
+                    # Check for next page
+                    cursor = fills_data.get('cursor')
+                    if not cursor or not fills:
+                        break
+
+                return all_fills
+
+            finally:
+                await client.close()
+
+        # Run sync
+        all_fills = asyncio.run(sync_all_transactions())
+
+        # Process and store transactions
+        processed_count = 0
+        error_count = 0
+
+        for fill in all_fills:
+            try:
+                # Process fill for tax
+                tax_data = process_fill_for_tax(fill)
+
+                # Store in database
+                CexTransaction.objects.update_or_create(
+                    user=request.user,
+                    exchange='coinbase_advanced',
+                    transaction_id=fill.get('entry_id'),
+                    defaults={
+                        'timestamp': datetime.fromisoformat(fill.get('trade_time').replace('Z', '+00:00')),
+                        'transaction_type': tax_data['type'].lower(),
+                        'asset': tax_data['asset'],
+                        'amount': Decimal(str(tax_data['quantity'])),
+                        'price': Decimal(str(fill.get('price', '0'))),
+                        'fee': Decimal(str(tax_data['fee'])),
+                        'fee_currency': tax_data['fee_currency'],
+                        'raw_data': fill
+                    }
+                )
+                processed_count += 1
+
+            except Exception as e:
+                logger.error(f"Error processing fill {fill.get('entry_id')}: {e}")
+                error_count += 1
+
+        return Response({
+            'success': True,
+            'total_fills': len(all_fills),
+            'processed': processed_count,
+            'errors': error_count,
+            'start_date': start_date,
+            'end_date': end_date
+        })
+
+    except Exception as e:
+        logger.error(f"Error syncing CDP transactions: {str(e)}")
+        return Response(
+            {'error': f'Failed to sync transactions: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def coinbase_cdp_key_delete(request):
+    """
+    Delete stored CDP key
+    """
+    try:
+        deleted_count = ExchangeCredential.objects.filter(
+            user=request.user,
+            exchange='coinbase_advanced',
+            auth_type='cdp'
+        ).delete()[0]
+
+        if deleted_count > 0:
+            return Response({
+                'success': True,
+                'message': 'CDP key deleted successfully'
+            })
+        else:
+            return Response({
+                'success': False,
+                'message': 'No CDP key found to delete'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+    except Exception as e:
+        logger.error(f"Error deleting CDP key: {str(e)}")
+        return Response(
+            {'error': f'Failed to delete CDP key: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )

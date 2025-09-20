@@ -121,6 +121,7 @@ class ExchangeCredential(models.Model):
     EXCHANGE_CHOICES = [
         ('binance', 'Binance'),
         ('coinbase', 'Coinbase'),
+        ('coinbase_advanced', 'Coinbase Advanced Trade'),
         ('bybit', 'Bybit'),
         ('kraken', 'Kraken'),
         ('kucoin', 'KuCoin'),
@@ -161,6 +162,18 @@ class ExchangeCredential(models.Model):
         ],
         default='idle'
     )
+    auth_type = models.CharField(
+        max_length=20,
+        choices=[
+            ('api_key', 'API Key'),
+            ('oauth', 'OAuth'),
+            ('cdp', 'CDP Key'),
+        ],
+        default='api_key',
+        null=True,
+        blank=True
+    )
+    is_connected = models.BooleanField(default=False)
 
     class Meta:
         unique_together = ('user', 'exchange')

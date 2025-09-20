@@ -277,6 +277,9 @@ ALCHEMY_API_KEY = os.environ.get('ALCHEMY_API_KEY', '')
 # Encryption key must be set in environment variables
 ENCRYPTION_KEY = 'O-ILu6xhk5m2f9bylytB3oC5DKLSIIgfuKcD0sqcwwc='
 
+# CDP Key Encryption (for Coinbase Advanced Trade)
+CDP_ENCRYPTION_KEY = os.environ.get('CDP_ENCRYPTION_KEY', ENCRYPTION_KEY)
+
 # Cache settings
 CACHES = {
     'default': {
