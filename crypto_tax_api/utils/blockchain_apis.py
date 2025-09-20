@@ -701,18 +701,38 @@ def parse_solana_tax_transaction(parsed_tx, user_address, signature, block_time)
                         'So11111111111111111111111111111111111111112': 'wSOL',  # Wrapped SOL
                         'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
                         'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
+                        '7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj': 'MSOL',  # Marinade staked SOL
+                        '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs': 'RAY',  # Raydium
+                        'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE': 'ORCA',  # Orca
+                        'SRMuApVNdxXokk5GT7XD5cUUgXMBCoAz2LHeuAoKWRt': 'SRM',  # Serum
+                        'HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3': 'PYTH',  # Pyth Network
+                        'jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL': 'JTO',  # Jito
+                        'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN': 'JUP',  # Jupiter
+                        'TNSRxcUxoT9xBG3de7PiJyTDYu7kskLqcpddxnEJAS6': 'TNSR',  # Tensor
+                        'MangoCzJ36AjZyKwVj3VnYU4GTonjfVEnJmvvWaxLac': 'MNGO',  # Mango
+                        'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK',  # Bonk
+                        'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm': 'WIF',  # dogwifhat
                         # Add more token mints as needed
                     }
 
                     token_symbol = token_map.get(mint_address, f'SPL-{mint_address[:6]}')
 
-                    # Get price (use placeholder for unknown tokens)
+                    # Get historical price for the token
                     if token_symbol in ['USDC', 'USDT']:
-                        price_usd = Decimal('1.00')  # Stablecoins
+                        price_usd = Decimal('1.00')  # Stablecoins always $1
                     elif token_symbol == 'wSOL':
-                        price_usd = Decimal(sol_price)  # Wrapped SOL has same price as SOL
+                        price_usd = Decimal(sol_price)  # Wrapped SOL has same price as SOL (already historical)
+                    elif not token_symbol.startswith('SPL-'):
+                        # Fetch historical price for known tokens
+                        try:
+                            unix_timestamp = int(timestamp.timestamp()) if hasattr(timestamp, 'timestamp') else int(time.time())
+                            token_price = fetch_historical_price(token_symbol, unix_timestamp)
+                            price_usd = Decimal(str(token_price))
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch historical price for {token_symbol}: {str(e)}")
+                            price_usd = Decimal('0.01')  # Fallback for price fetch failure
                     else:
-                        price_usd = Decimal('0.01')  # TODO: Implement token price lookup
+                        price_usd = Decimal('0.01')  # Unknown SPL tokens
 
                     value_usd = token_amount * price_usd
 

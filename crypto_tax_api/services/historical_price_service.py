@@ -102,6 +102,33 @@ COINGECKO_ID_MAP = {
     'VIRTUAL': 'virtuals-protocol',
     'JUNFOX': 'junfox',
     'EPIN': 'epin',
+    # Solana SPL Tokens
+    'wSOL': 'solana',  # Wrapped SOL uses same price as SOL
+    'PYTH': 'pyth-network',
+    'JTO': 'jito-governance-token',
+    'JUP': 'jupiter-exchange-solana',
+    'TNSR': 'tensor',
+    'ORCA': 'orca',
+    'RAY': 'raydium',
+    'MNGO': 'mango-markets',
+    'SRM': 'serum',
+    'STEP': 'step-finance',
+    'FIDA': 'bonfida',
+    'SABER': 'saber',
+    'MSOL': 'marinade-staked-sol',
+    'SAMO': 'samoyedcoin',
+    'COPE': 'cope',
+    'STAR': 'star-atlas',
+    'POLIS': 'star-atlas-polis',
+    'MEAN': 'mean-dao',
+    'GST': 'green-satoshi-token',
+    'GMT': 'stepn',
+    'DFL': 'defi-land',
+    'SBR': 'saber',
+    'PORT': 'port-finance',
+    'MNDE': 'marinade',
+    'LIQ': 'liquidus',
+    'ATLAS': 'star-atlas',
 }
 
 
