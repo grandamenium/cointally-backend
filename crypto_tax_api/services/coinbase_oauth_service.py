@@ -15,10 +15,10 @@ class CoinbaseOAuthService:
     """Service for handling Coinbase OAuth authentication"""
     
     def __init__(self):
-        # OAuth endpoints
-        self.auth_url = "https://coinbase.com/oauth/authorize"
-        self.token_url = "https://api.coinbase.com/oauth/token"
-        self.revoke_url = "https://api.coinbase.com/oauth/revoke"
+        # OAuth endpoints (Updated to current Coinbase OAuth2 endpoints)
+        self.auth_url = "https://login.coinbase.com/oauth2/auth"
+        self.token_url = "https://login.coinbase.com/oauth2/token"
+        self.revoke_url = "https://login.coinbase.com/oauth2/revoke"
         
         # API endpoints
         self.api_base_url = "https://api.coinbase.com/v2"
@@ -43,7 +43,8 @@ class CoinbaseOAuthService:
             Authorization URL string
         """
         if scope is None:
-            scope = "wallet:accounts:read,wallet:transactions:read,wallet:buys:read,wallet:sells:read,wallet:deposits:read,wallet:withdrawals:read"
+            # Include offline_access for refresh token capability
+            scope = "wallet:accounts:read,wallet:transactions:read,wallet:buys:read,wallet:sells:read,wallet:deposits:read,wallet:withdrawals:read,offline_access"
         
         params = {
             'response_type': 'code',
@@ -429,4 +430,223 @@ class CoinbaseOAuthService:
             
         except Exception as e:
             logger.error(f"Failed to refresh token: {str(e)}")
-            raise Exception("Token refresh failed, user needs to re-authorize") 
+            raise Exception("Token refresh failed, user needs to re-authorize")
+
+    def get_all_accounts_with_pagination(self, access_token):
+        """
+        Get all user accounts with pagination support
+
+        Returns:
+            list: All account data
+        """
+        all_accounts = []
+        starting_after = None
+
+        while True:
+            try:
+                params = {'limit': 100}
+                if starting_after:
+                    params['starting_after'] = starting_after
+
+                response = self.make_authenticated_request(access_token, 'GET', '/accounts', params=params)
+
+                accounts = response.get('data', [])
+                if not accounts:
+                    break
+
+                all_accounts.extend(accounts)
+
+                # Check pagination
+                pagination = response.get('pagination', {})
+                if not pagination.get('next_uri'):
+                    break
+
+                # Extract starting_after from next_uri
+                next_uri = pagination['next_uri']
+                if 'starting_after=' in next_uri:
+                    starting_after = next_uri.split('starting_after=')[1].split('&')[0]
+                else:
+                    break
+
+            except Exception as e:
+                logger.error(f"Error fetching accounts: {str(e)}")
+                break
+
+        return all_accounts
+
+    def get_all_account_transactions_with_pagination(self, access_token, account_id):
+        """
+        Get all transactions for an account with pagination support
+
+        Args:
+            access_token: OAuth access token
+            account_id: Coinbase account ID
+
+        Returns:
+            list: All transaction data for the account
+        """
+        all_transactions = []
+        starting_after = None
+
+        while True:
+            try:
+                params = {'limit': 100}
+                if starting_after:
+                    params['starting_after'] = starting_after
+
+                endpoint = f"/accounts/{account_id}/transactions"
+                response = self.make_authenticated_request(access_token, 'GET', endpoint, params=params)
+
+                transactions = response.get('data', [])
+                if not transactions:
+                    break
+
+                all_transactions.extend(transactions)
+
+                # Check pagination
+                pagination = response.get('pagination', {})
+                if not pagination.get('next_uri'):
+                    break
+
+                # Extract starting_after from next_uri
+                next_uri = pagination['next_uri']
+                if 'starting_after=' in next_uri:
+                    starting_after = next_uri.split('starting_after=')[1].split('&')[0]
+                else:
+                    break
+
+            except Exception as e:
+                logger.error(f"Error fetching transactions for account {account_id}: {str(e)}")
+                break
+
+        return all_transactions
+
+    def sync_all_transaction_data(self, access_token):
+        """
+        Sync all transaction data from all accounts
+
+        Returns:
+            dict: Summary of sync operation
+        """
+        try:
+            # Get all accounts
+            accounts = self.get_all_accounts_with_pagination(access_token)
+
+            total_transactions = 0
+            accounts_processed = 0
+            all_transactions = []
+
+            for account in accounts:
+                account_id = account['id']
+                account_name = account.get('name', 'Unknown')
+
+                logger.info(f"Syncing transactions for account: {account_name} ({account_id})")
+
+                # Get all transactions for this account
+                transactions = self.get_all_account_transactions_with_pagination(access_token, account_id)
+
+                # Process each transaction
+                for transaction in transactions:
+                    # Convert to tax engine format
+                    tax_transaction = self._convert_coinbase_transaction_to_tax_format(transaction, account)
+                    if tax_transaction:
+                        all_transactions.append(tax_transaction)
+                        total_transactions += 1
+
+                accounts_processed += 1
+
+            return {
+                'success': True,
+                'accounts_processed': accounts_processed,
+                'total_transactions': total_transactions,
+                'transactions': all_transactions
+            }
+
+        except Exception as e:
+            logger.error(f"Error syncing transaction data: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+    def _convert_coinbase_transaction_to_tax_format(self, coinbase_tx, account):
+        """
+        Convert Coinbase v2 transaction to tax engine format
+
+        Args:
+            coinbase_tx: Coinbase transaction data
+            account: Account data for context
+
+        Returns:
+            dict: Transaction in tax engine format
+        """
+        try:
+            # Extract basic transaction info
+            tx_type = coinbase_tx.get('type')
+            amount_data = coinbase_tx.get('amount', {})
+            native_amount = coinbase_tx.get('native_amount', {})
+
+            # Map Coinbase transaction types to tax types
+            type_mapping = {
+                'buy': 'buy',
+                'sell': 'sell',
+                'send': 'transfer_out',
+                'receive': 'transfer_in',
+                'trade': 'trade',
+                'advanced_trade_fill': 'trade',
+                'pro_deposit': 'deposit',
+                'pro_withdrawal': 'withdrawal',
+                'fiat_deposit': 'deposit',
+                'fiat_withdrawal': 'withdrawal',
+                'interest': 'staking_reward',
+                'learning_reward': 'reward',
+                'coinbase_earn': 'reward',
+                'earn_payout': 'staking_reward',
+                'mining_payout': 'mining_reward',
+                'referral_bonus': 'reward'
+            }
+
+            mapped_type = type_mapping.get(tx_type, 'other')
+
+            # Extract amounts
+            amount = abs(float(amount_data.get('amount', 0)))
+            currency = amount_data.get('currency', 'USD')
+
+            # Extract USD value
+            usd_value = abs(float(native_amount.get('amount', 0))) if native_amount.get('currency') == 'USD' else 0
+
+            # Parse timestamp
+            created_at = coinbase_tx.get('created_at')
+            if created_at:
+                from datetime import datetime
+                timestamp = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+            else:
+                timestamp = datetime.now(timezone.utc)
+
+            # Build tax transaction
+            tax_transaction = {
+                'user': None,  # Will be set by calling code
+                'exchange': 'coinbase',
+                'transaction_id': f"coinbase-oauth-{coinbase_tx['id']}",
+                'transaction_type': mapped_type,
+                'timestamp': timestamp,
+                'asset_symbol': currency,
+                'amount': amount,
+                'price_usd': usd_value / amount if amount > 0 else 0,
+                'value_usd': usd_value,
+                'fee_amount': 0,  # v2 API doesn't provide detailed fee info
+                'fee_asset': currency,
+                'fee_usd': 0,
+                'description': coinbase_tx.get('description', ''),
+                'details': {
+                    'coinbase_account_id': account['id'],
+                    'coinbase_account_name': account.get('name'),
+                    'original_transaction': coinbase_tx
+                }
+            }
+
+            return tax_transaction
+
+        except Exception as e:
+            logger.error(f"Error converting Coinbase transaction: {str(e)}")
+            return None 

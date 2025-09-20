@@ -1683,7 +1683,15 @@ class CoinbaseService(BaseExchangeService):
             return False, str(e)
 
     def sync_transactions(self, start_date=None, end_date=None, progress_callback=None, force_full_sync=False):
-        """Sync comprehensive transaction data from Coinbase using v2 and Advanced Trade APIs."""
+        """Sync comprehensive transaction data from Coinbase using OAuth or CDP API."""
+        if self.is_oauth:
+            return self._sync_oauth_transactions(start_date, end_date, progress_callback)
+        else:
+            # Existing CDP sync logic
+            return self._sync_cdp_transactions(start_date, end_date, progress_callback, force_full_sync)
+
+    def _sync_cdp_transactions(self, start_date=None, end_date=None, progress_callback=None, force_full_sync=False):
+        """Original CDP-based sync method"""
         self.progress_callback = progress_callback
         SyncProgressService.initialize_sync(self.exchange_id)
         self._update_sync_progress(1, "Initializing sync")
@@ -1742,6 +1750,63 @@ class CoinbaseService(BaseExchangeService):
             self._update_sync_progress(100, f"Sync failed: {str(e)}")
             
         return total_transactions_saved
+
+    def _sync_oauth_transactions(self, start_date=None, end_date=None, progress_callback=None):
+        """Sync transactions using OAuth v2 API"""
+        try:
+            self.progress_callback = progress_callback
+            SyncProgressService.initialize_sync(self.exchange_id)
+            self._update_sync_progress(10, "Starting OAuth sync...")
+
+            # Get valid access token
+            access_token = self.oauth_service.ensure_valid_token(self.user)
+
+            # Use the new comprehensive sync method
+            sync_result = self.oauth_service.sync_all_transaction_data(access_token)
+
+            if sync_result['success']:
+                # Save transactions to database
+                transactions_saved = 0
+                for tx_data in sync_result.get('transactions', []):
+                    try:
+                        # Add user to transaction data
+                        tx_data['user'] = self.user
+
+                        # Create or update transaction
+                        CexTransaction.objects.update_or_create(
+                            user=self.user,
+                            exchange='coinbase',
+                            transaction_id=tx_data['transaction_id'],
+                            defaults={
+                                'transaction_type': tx_data['transaction_type'],
+                                'timestamp': tx_data['timestamp'],
+                                'asset_symbol': tx_data['asset_symbol'],
+                                'amount': Decimal(str(tx_data['amount'])),
+                                'price_usd': Decimal(str(tx_data['price_usd'])),
+                                'value_usd': Decimal(str(tx_data['value_usd'])),
+                                'fee_amount': Decimal(str(tx_data['fee_amount'])),
+                                'fee_asset': tx_data['fee_asset'],
+                                'fee_usd': Decimal(str(tx_data['fee_usd'])),
+                                'description': tx_data['description'],
+                                'details': json.dumps(tx_data['details'])
+                            }
+                        )
+                        transactions_saved += 1
+                    except Exception as e:
+                        logger.error(f"Error saving OAuth transaction: {str(e)}")
+
+                self._update_sync_progress(100, f"OAuth sync completed: {transactions_saved} transactions")
+                SyncProgressService.complete_sync(self.exchange_id)
+                return transactions_saved
+            else:
+                raise Exception(sync_result.get('error', 'Unknown error'))
+
+        except Exception as e:
+            error_msg = f"OAuth sync failed: {str(e)}"
+            logger.error(error_msg)
+            SyncProgressService.fail_sync(self.exchange_id, str(e))
+            self._update_sync_progress(0, error_msg)
+            raise
 
     # [Additional sync methods would go here - _sync_spot_fills, _sync_deposits_withdrawals_v2, etc.]
     # For brevity, I'll add a few key methods:
